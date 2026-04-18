@@ -1,3 +1,9 @@
+## Files to Load
+
+- `cv.md` — proof points for message personalization (required)
+- `config/profile.yml` — name and contact info (core sections only)
+- `modes/_profile.md` — narrative and framing
+
 # Modo: contacto -- LinkedIn Power Move
 
 1. **Identificar targets** via WebSearch:

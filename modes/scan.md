@@ -1,3 +1,12 @@
+## Files to Load
+
+- `portals.yml` — portal configuration and company list (required)
+- `data/scan-history.tsv` — dedup history (required, create if missing)
+- `data/applications.md` — dedup against already-evaluated roles
+- `data/pipeline.md` — dedup against already-queued URLs
+
+**Do NOT load:** cv.md, _profile.md, article-digest.md — not needed for discovery.
+
 # Modo: scan — Portal Scanner (Descubrimiento de Ofertas)
 
 Escanea portales de empleo configurados, filtra por relevancia de título, y añade nuevas ofertas al pipeline para evaluación posterior.

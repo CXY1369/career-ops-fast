@@ -69,27 +69,44 @@ Or paste a JD directly to run the full pipeline.
 
 ## Context Loading by Mode
 
-After determining the mode, load the necessary files before executing:
+After determining the mode, load the necessary files before executing. Each mode file declares its own load list at the top — follow it exactly.
 
 ### Modes that require `_shared.md` + their mode file:
 Read `modes/_shared.md` + `modes/{mode}.md`
 
-Applies to: `auto-pipeline`, `oferta`, `ofertas`, `pdf`, `contacto`, `apply`, `pipeline`, `scan`, `batch`
+Applies to: `auto-pipeline`, `oferta`, `ofertas`, `pdf`, `contacto`, `apply`, `pipeline`, `batch`
+
+**Note:** `scan` no longer loads `_shared.md` — it has its own self-contained load list (portals.yml, scan-history.tsv, applications.md, pipeline.md).
 
 ### Standalone modes (only their mode file):
 Read `modes/{mode}.md`
 
-Applies to: `tracker`, `deep`, `training`, `project`, `patterns`, `followup`
+Applies to: `tracker`, `deep`, `training`, `project`, `patterns`, `followup`, `scan`
+
+### Model routing:
+Select the model based on the task complexity:
+
+| Mode | Model | Reason |
+|------|-------|--------|
+| `oferta`, `auto-pipeline`, `pdf`, `ofertas`, `batch` | `sonnet` | Deep reasoning + quality writing |
+| `contacto`, `apply`, `deep`, `training`, `project` | `sonnet` | Reasoning + personalization |
+| `scan`, `tracker`, `followup`, `patterns` | `haiku` | Data aggregation, no reasoning needed |
+| `pipeline` orchestration | `haiku` | Reads pipeline.md, groups URLs, spawns agents |
+| `pipeline` evaluation agents | `sonnet` | Each agent runs A-G evaluation blocks |
 
 ### Modes delegated to subagent:
-For `scan`, `apply` (with Playwright), and `pipeline` (3+ URLs): launch as Agent with the content of `_shared.md` + `modes/{mode}.md` injected into the subagent prompt.
+For `scan`, `apply` (with Playwright), and `pipeline` (3+ URLs): launch as Agent with the mode file content injected into the subagent prompt. For `scan` and `pipeline`, omit `_shared.md` from the prompt.
 
-```
+```javascript
 Agent(
   subagent_type="general-purpose",
-  prompt="[content of modes/_shared.md]\n\n[content of modes/{mode}.md]\n\n[invocation-specific data]",
+  model="{model per routing table above}",
+  prompt="[content of modes/{mode}.md]\n\n[invocation-specific data]",
   description="career-ops {mode}"
 )
 ```
+
+**Pipeline agents — structured output contract:**
+Pipeline evaluation agents NEVER use Write or Bash tools. They return structured text with `=== REPORT_{NUM} ===` / `=== TSV_{NUM} ===` / `=== END_{NUM} ===` delimiters. The orchestrating session (main) parses this output and writes all files. This avoids subagent Write permission issues and keeps I/O centralized.
 
 Execute the instructions from the loaded mode file.

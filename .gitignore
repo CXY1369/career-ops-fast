@@ -17,8 +17,11 @@ jds/*
 
 # User config and customization (never auto-updated)
 config/profile.yml
+config/profile-apply.yml
 portals.yml
 modes/_profile.md
+cv.md
+article-digest.md
 .update-dismissed
 .update-lock
 
@@ -35,5 +38,6 @@ bun.lock
 # Claude Code local
 .claude/settings.local.json
 .claude/memory/
+.claude/worktrees/
 career-dashboard
 package-lock.json

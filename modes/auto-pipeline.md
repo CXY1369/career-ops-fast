@@ -23,8 +23,16 @@ Ejecutar exactamente igual que el modo `oferta` (leer `modes/oferta.md` para tod
 Guardar la evaluación completa en `reports/{###}-{company-slug}-{YYYY-MM-DD}.md` (ver formato en `modes/oferta.md`).
 Include Block G in the saved report. Add `**Legitimacy:** {tier}` to the report header.
 
-## Paso 3 — Generar PDF
-Ejecutar el pipeline completo de `pdf` (leer `modes/pdf.md`).
+## Paso 3 — Generar PDF (Tier-conditional)
+
+- **Tier 1 (score ≥ 4.2):** Execute full PDF pipeline (read `modes/pdf.md`). Generate fully tailored PDF.
+- **Tier 2 (score 3.0–4.1):** Skip PDF generation. Instruct user to use the closest pre-generated Master PDF:
+  - AI/ML Engineer → `output/master-cv-ai-mle.pdf`
+  - Bio/ML / Computational Biology → `output/master-cv-bio-ml.pdf`
+  - Data Science → `output/master-cv-data-science.pdf`
+  - Quant/Finance → `output/master-cv-quant.pdf`
+  - If Master PDF doesn't exist → offer to generate it once with `/career-ops pdf` and save to that path.
+- **Tier 3 (score < 3.0):** Skip entirely. Pipeline already terminated after Block C.
 
 ## Paso 4 — Draft Application Answers (solo si score >= 4.5)
 

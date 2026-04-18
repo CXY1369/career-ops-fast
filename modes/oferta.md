@@ -1,3 +1,13 @@
+## Files to Load
+
+- `cv.md` — candidate CV (required)
+- `modes/_profile.md` — user archetypes and framing (required)
+- `config/profile.yml` — candidate identity, targets, compensation (core sections only: candidate, target_roles, narrative, compensation, work_preference) — skip work_authorization, demographics, common_answers
+- `article-digest.md` — proof points (load only if file exists)
+- `data/scan-history.tsv` — reposting detection (load only for Block G, only if file exists)
+
+**CV Pruning:** Before Block B, identify which sections of cv.md are relevant to this JD's archetype and domain. Only use the top 2-3 work experience entries and top 3-4 projects most relevant to the role. Skip unrelated projects to reduce processing cost.
+
 # Modo: oferta — Evaluación Completa A-G
 
 Cuando el candidato pega una oferta (texto o URL), entregar SIEMPRE los 7 bloques (A-F evaluation + G legitimacy):
@@ -44,12 +54,32 @@ Sección de **gaps** con estrategia de mitigación para cada uno. Para cada gap:
 2. **Plan "vender senior sin mentir"**: frases específicas adaptadas al arquetipo, logros concretos a destacar, cómo posicionar la experiencia de founder como ventaja
 3. **Plan "si me downlevelan"**: aceptar si comp es justa, negociar review a 6 meses, criterios de promoción claros
 
+## Scoring Gate — Tier Assignment
+
+After completing Block C, assign a preliminary tier based on the expected global score:
+
+| Tier | Score | Action |
+|------|-------|--------|
+| **Tier 1 — Sniper** | ≥ 4.2 | Continue full pipeline: Blocks D, E, F, G + tailored PDF |
+| **Tier 2 — Scout** | 3.0–4.1 | Run Blocks D and G only (no Block E, no Block F). Use closest Master PDF archetype instead of generating new PDF. |
+| **Tier 3 — Pass** | < 3.0 | Stop here. Output Blocks A–C summary + one-paragraph "why not." Save short report. No PDF. Notify: "Score is X/5 — below threshold. Recommend against applying." |
+
+**For Tier 2:** After Block G, instruct the user which Master PDF to use:
+- AI/ML Engineer roles → `output/master-cv-ai-mle.pdf`
+- Bio/ML or Computational Biology roles → `output/master-cv-bio-ml.pdf`
+- Data Science roles → `output/master-cv-data-science.pdf`
+- Quant/Finance roles → `output/master-cv-quant.pdf`
+- If Master PDF doesn't exist yet → generate it once with `/career-ops pdf` and save to that path.
+
 ## Bloque D — Comp y Demanda
 
-Usar WebSearch para:
-- Salarios actuales del rol (Glassdoor, Levels.fyi, Blind)
-- Reputación de compensación de la empresa
-- Tendencia de demanda del rol
+**Conditional research — check company tier first:**
+
+- **Well-known company** (publicly traded AND 1,000+ employees, e.g. FAANG, Stripe, Salesforce, Microsoft, Adobe, Uber, Airbnb, etc.): Use training knowledge for comp benchmarks. No WebSearch needed. Note source as "industry-known benchmark."
+- **All other companies** (startups, private companies, less-known employers, non-tech sector): Run these searches **in parallel simultaneously**:
+  - WebSearch: `"{role title}" salary site:levels.fyi OR site:glassdoor.com {year}`
+  - WebSearch: `"{company}" compensation engineer salary`
+  - WebSearch: `"{role}" demand trend hiring {year}`
 
 Tabla con datos y fuentes citadas. Si no hay datos, decirlo en vez de inventar.
 
@@ -63,6 +93,10 @@ Tabla con datos y fuentes citadas. Si no hay datos, decirlo en vez de inventar.
 Top 5 cambios al CV + Top 5 cambios a LinkedIn para maximizar match.
 
 ## Bloque F — Plan de Entrevistas
+
+**Block F runs only for Tier 1 (score ≥ 4.0). For Tier 2 (3.0–4.1), replace Block F with:** "Run `/career-ops interview-prep` after applying to generate STAR stories."
+
+**Select-first logic:** Before generating any stories, check `interview-prep/story-bank.md` if it exists. For each JD requirement, first search the bank for a matching story. Only draft a new story if no match exists in the bank. Reuse and refine existing stories rather than rewriting from scratch.
 
 6-10 historias STAR+R mapeadas a requisitos del JD (STAR + **Reflection**):
 
@@ -107,10 +141,13 @@ Analyze the job posting for signals that indicate whether this is a real, active
 - What ratio of the JD is role-specific vs generic boilerplate?
 - Any internal contradictions? (entry-level title + staff requirements, etc.)
 
-**3. Company Hiring Signals** (2-3 WebSearch queries, combine with Block D research):
-- Search: `"{company}" layoffs {year}` -- note date, scale, departments
-- Search: `"{company}" hiring freeze {year}` -- note any announcements
-- If layoffs found: are they in the same department as this role?
+**3. Company Hiring Signals:**
+
+- **Well-known company** (publicly traded AND 1,000+ employees) with an active Apply button on their own careers page: Skip layoff/hiring-freeze searches. Note: "Established employer — ghost job risk low."
+- **All other companies**: Run these searches **in parallel simultaneously**:
+  - WebSearch: `"{company}" layoffs {year}`
+  - WebSearch: `"{company}" hiring freeze {year}`
+  - Note date, scale, departments affected. Check if the same department as this role.
 
 **4. Reposting Detection** (from scan-history.tsv):
 - Check if company + similar role title appeared before with a different URL
