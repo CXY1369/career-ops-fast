@@ -109,3 +109,26 @@ If the user has no `canva_resume_design_id`, skip this and proceed with the HTML
 ## Post-generación
 
 Actualizar tracker si la oferta ya está registrada: cambiar PDF de ❌ a ✅.
+
+## Template & PDF Integrity (MANDATORY — learned from incident 2026-04-23)
+
+**Rule 1 — Never put the literal string `</style>` inside a `<style>` block, even in CSS comments.** HTML parsers close the style tag at the first `</style>` regardless of CSS context, dumping all remaining CSS as body text. Same rule for `</script>` inside `<script>`. If you must reference these strings in a comment, break them (e.g. `closing style tag`, `< / style >`, or `<\/style>` — the escape only works in JS strings, not HTML).
+
+**Rule 2 — After ANY edit to `templates/cv-template.html` or `generate-pdf.mjs`, generate ONE test PDF first.** Do not batch-generate N PDFs before verifying one. Run:
+```bash
+qlmanage -t -s 1200 -o /tmp/ output/<one-pdf>.pdf
+```
+and Read the resulting PNG to confirm layout. Only then batch.
+
+**Rule 3 — PDF sanity signals (check every generation):**
+| Signal | Healthy | Broken |
+|--------|---------|--------|
+| Pages | 1–2 | 3+ (CSS not applied → content overflows) |
+| File size | 100–150 KB | < 80 KB (fonts not embedded → Times fallback) |
+| `/BaseFont` in PDF | `DMSans`, `SpaceGrotesk` | `Times-Roman`, `Helvetica` (default fallback) |
+
+Quick audit command:
+```bash
+node -e "const s=require('fs').readFileSync(process.argv[1]).toString('latin1'); console.log('fonts:', [...new Set((s.match(/\\/BaseFont \\/[^ \\/\\n]+/g)||[]))]);" output/<pdf>
+```
+If any two signals are off → template CSS is broken. Stop and diagnose before proceeding.

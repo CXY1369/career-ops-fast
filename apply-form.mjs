@@ -53,7 +53,9 @@ async function fillById(page, id, value) {
 
 async function fillByLabel(page, labelText, value) {
   try {
-    await page.getByLabel(labelText, { exact: false }).first().fill(String(value));
+    const loc = page.getByLabel(labelText, { exact: false }).first();
+    await loc.waitFor({ state: 'visible', timeout: 2000 });
+    await loc.fill(String(value));
     return true;
   } catch {
     return false;
@@ -144,12 +146,15 @@ await page.goto(cfg.url, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(2000); // allow Greenhouse React to hydrate
 
 // Detect: are we on the JD page with an Apply button, or already on the form?
-const applyBtn = page.locator('button', { hasText: /^Apply$/i }).first();
-if (await applyBtn.count() > 0 && await applyBtn.isVisible()) {
-  // Still on JD — click Apply
+// Broad match: "Apply", "Apply now", "Apply for this job", "Apply Here" — on <button> or <a>
+const applyBtn = page.locator(
+  'button, a',
+  { hasText: /^\s*Apply(\s+(now|here|for|to)\b.*)?\s*$/i }
+).first();
+if (await applyBtn.count() > 0 && await applyBtn.isVisible().catch(() => false)) {
   log('Clicking Apply button...');
-  await applyBtn.click();
-  await page.waitForTimeout(1500);
+  await applyBtn.click().catch(() => {});
+  await page.waitForTimeout(2500);
 }
 
 // 1. Fill text fields
