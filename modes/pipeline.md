@@ -1,171 +1,61 @@
-# Modo: pipeline — Inbox de URLs (Second Brain)
+# Mode: pipeline — URL Inbox (Second Brain)
 
-Procesa URLs de ofertas acumuladas en `data/pipeline.md`. El usuario agrega URLs cuando quiera y luego ejecuta `/career-ops pipeline` para procesarlas todas.
-
----
-
-## Pre-procesamiento
-
-```bash
-node cv-sync-check.mjs
-```
-Si hay desincronización, avisar al usuario antes de continuar.
-
----
+Process job URLs stored in `data/pipeline.md`. The user adds URLs at any time and then executes `/career-ops pipeline` to process them all.
 
 ## Workflow
 
-### Paso 1 — Leer URLs pendientes
+1. **Read** `data/pipeline.md` → search for `- [ ]` items in the "Pending" section
+2. **For each pending URL**:
+   a. Calculate the next sequential `REPORT_NUM` (read `reports/`, take the highest number + 1)
+   b. **Extract JD** using Playwright (browser_navigate + browser_snapshot) → WebFetch → WebSearch
+   c. If the URL is not accessible → mark as `- [!]` with a note and continue
+   d. **Execute full auto-pipeline**: Evaluation A-F → Report .md → PDF (if score >= `auto_pdf_score_threshold`) → Tracker
+   e. **Move from "Pending" to "Processed"**: `- [x] #NNN | URL | Company | Role | Score/5 | PDF ✅/❌`
 
-Leer `data/pipeline.md` → extraer todos los items `- [ ]` de `## Pending`.
+   **About the PDF gate (configurable):** Read `config/profile.yml` → `auto_pdf_score_threshold`. If the key does not exist, default to `3.0` (this mode's original gate). If the evaluation score is less than the threshold, skip PDF generation: write the report normally, show in the header `**PDF:** not generated — run /career-ops pdf {company-slug} to create on demand`, and mark PDF ❌ in the tracker. If the score is ≥ threshold, generate the PDF as usual.
 
-Pre-asignar números de reporte: listar `reports/`, extraer número más alto + 1, asignar secuencialmente a cada URL en orden de aparición.
-
----
-
-### Paso 2 — Pre-triage (instant blockers, <5 seg/URL)
-
-Para cada URL, hacer WebFetch rápido. Revisar **solo** los siguientes blockers antes de cualquier evaluación completa:
-
-| Blocker | Condición | Acción |
-|---------|-----------|--------|
-| Comp ceiling | Salario máximo listado en JD < $100K | SKIP |
-| YoE hard requirement | JD requiere 5+ años experience (industry, no research) | SKIP |
-| Security clearance | JD requiere TS/SCI/Secret/clearance | SKIP |
-| Required license | JD requiere RN, MD, CPA, JD, PE u otro título profesional | SKIP |
-
-**Si SKIP:** escribir reporte de 1 párrafo en `reports/{num}-{slug}-{date}.md`, status=`SKIP` en TSV, marcar `- [!]` en pipeline.md. No ejecutar evaluación completa.
-
-**Si ningún blocker:** continuar al Paso 3.
-
----
-
-### Paso 3 — Grouping por arquetipo
-
-Si `pipeline.md` tiene secciones (`### Category`), agrupar URLs por sección. Esto permite cargar **solo la sección CV relevante** en cada agente en lugar del CV completo.
-
-**Tabla de secciones CV por arquetipo:**
-
-| Sección en pipeline.md | Extracto de cv.md a incluir | Omitir |
-|------------------------|----------------------------|----|
-| AI/ML Engineer | CHACAM (1 bullet), MedLogic AI, Sign Language Generator, DistilBERT NER, PSYONIC, Skills (AI/ML + frameworks) | scRNA-seq detail, bio-heavy bullets |
-| Data Scientist | CHACAM (stats angle, 1 bullet), Biogen (brief), Spark Streaming, Multi-Agent Trading, Skills (Python/SQL/stats/sklearn) | Full bio context, ligand-receptor details |
-| Computational Biology / Bioinformatics | Education, CHACAM (full), Biogen (full), Publications, Skills (bio + ML) | Chase Offer Adder, SQL projects, OS simulator |
-| Quant | PhD math context (1 sentence), Multi-Agent Trading System (full), Skills (Python/R/Matlab/C++) | Bio projects, scRNA-seq, MedLogic AI |
-| (sin sección / default) | cv.md completo | — |
-
-**Regla de agrupación:** lanzar 1 agente por sección (máximo 4 en paralelo). Si una sección tiene >3 URLs, dividir en sub-grupos de 2-3.
-
----
-
-### Paso 4 — Lanzar agentes en paralelo
-
-Para cada grupo lanzar un agente con `run_in_background=true` y `model="sonnet"`.
-
-**Contenido del prompt del agente:**
-1. El extracto de cv.md para el arquetipo (NO el cv.md completo)
-2. Profile core: solo `candidate`, `compensation`, `work_preference` de profile.yml
-3. Las URLs del grupo con sus report numbers pre-asignados
-4. Las instrucciones de evaluación compacta (ver Paso 4a)
-
-#### Paso 4a — Evaluación compacta por URL (dentro del agente)
-
-Para cada URL, ejecutar **solo estos bloques**:
-
-| Bloque | ¿Ejecutar? | Notas |
-|--------|-----------|-------|
-| A — Resumen del Rol | ✅ siempre | |
-| B — Match con CV | ✅ siempre | Solo con la sección CV del grupo |
-| C — Nivel y Estrategia | ✅ siempre | |
-| **Scoring Gate → asignar Tier** | ✅ siempre | Determina qué sigue |
-| D — Comp y Demanda | ✅ Tier 1 y 2 | Skip si Tier 3. Para empresas conocidas (HRT, Figma, Five Rings, FAANG, etc.) usar benchmark interno — NO hacer WebSearch |
-| **E — Plan de Personalización** | ❌ NUNCA | Se genera bajo demanda con `/career-ops pdf` |
-| **F — Plan de Entrevistas** | ❌ NUNCA | Se genera bajo demanda con `/career-ops interview-prep` |
-| G — Posting Legitimacy | ✅ Tier 1 y 2 | Skip si Tier 3. Para empresas con 1000+ empleados o cotizadas en bolsa: "Established employer — skip layoff search" |
-| Keywords | ✅ solo Tier 1 | Para ATS optimization en futuros PDFs |
-
-**Nota de comp para empresas conocidas (NO hacer WebSearch):**
-Usar conocimiento de entrenamiento directamente para: Stripe, Google, Meta, Amazon, Microsoft, Apple, Netflix, Uber, Airbnb, Figma, HRT, Citadel, Two Sigma, Five Rings, Jump Trading, DE Shaw, y cualquier empresa cotizada con >1000 empleados. Citar como "industry-known benchmark."
-
-**Resultado por Tier:**
-- **Tier 1 (≥4.2):** Reporte completo A + B + C + D + G + Keywords. Header: `**PDF:** Pending — generate with /career-ops pdf {num}`. Nota en TSV: "Tier 1: [key reason]. Generate tailored PDF."
-- **Tier 2 (3.0–4.1):** Reporte A + B + C + D + G. Indicar master CV: `output/master-cv-{archetype}.pdf`. Nota en TSV: "Tier 2: [key reason]. Use master-cv-{archetype}.pdf."
-- **Tier 3 (<3.0):** Reporte de 1 párrafo. Status = `SKIP`. Nota en TSV: "Tier 3: [blocker]. SKIP."
-
----
-
-### Paso 5 — Contrato de salida del agente (CRÍTICO)
-
-**Los agentes NO usan Write ni Bash. Solo devuelven texto estructurado.**
-
-El orchestrador (sesión principal) escribe todos los archivos. Formato de retorno por URL evaluada:
+   **Tuning it:** Generating a tailored PDF costs ~30–60s per entry (Playwright launch + HTML render) and produces files that often go unused — most roles score in the 2.x/3.x range and never reach the application stage. Raise `auto_pdf_score_threshold` (e.g. `4.0`) to write only the report for marginal offers and produce the PDF on demand via `/career-ops pdf {slug}`; set `0` to generate one for every offer. Both modes (Path A `/career-ops pipeline` and Path B `batch/batch-runner.sh`) read the same key, so behavior is identical regardless of which path processes an offer.
+3. **If there are 3+ pending URLs**, launch agents in parallel (Agent tool with `run_in_background`) to maximize speed.
+4. **At the end**, show summary table:
 
 ```
-=== REPORT_{NUM} ===
-# Evaluation: {Company} — {Role}
-
-**Date:** {YYYY-MM-DD}
-**Archetype:** {detected}
-**Score:** {X.X/5}
-**URL:** {url}
-**Legitimacy:** {tier}
-**PDF:** {note}
-
-[bloques A B C D G según aplique]
-=== TSV_{NUM} ===
-{num}\t{date}\t{company}\t{role}\t{status}\t{score}/5\t❌\t[{num}](reports/{filename}.md)\t{one-line note}
-=== END_{NUM} ===
+| # | Company | Role | Score | PDF | Recommended action |
 ```
 
-Si el agente maneja 2 URLs, devuelve dos bloques `REPORT/TSV/END` consecutivos.
-
----
-
-### Paso 6 — Orchestrador escribe archivos
-
-Al completar todos los agentes, el **orchestrador (sesión principal)**:
-
-1. Parsear cada bloque `=== REPORT_{NUM} ===` → Write a `reports/{num}-{slug}-{date}.md`
-2. Parsear cada bloque `=== TSV_{NUM} ===` → Write a `batch/tracker-additions/{num}-{slug}.tsv`
-3. Ejecutar `node merge-tracker.mjs` **una sola vez** al final
-4. Actualizar `data/pipeline.md`: mover items de `## Pending` a `## Processed`
-
----
-
-### Paso 7 — Resumen final
-
-Mostrar tabla:
-
-```
-| # | Empresa | Rol | Score | Tier | PDF | Acción recomendada |
-```
-
----
-
-## Formato de pipeline.md
+## Format of pipeline.md
 
 ```markdown
 ## Pending
-
-### AI/ML Engineer
-- [ ] https://... | Company | Role
-
-### Data Scientist
-- [ ] https://... | Company | Role
+- [ ] https://jobs.example.com/posting/123
+- [ ] https://boards.greenhouse.io/company/jobs/456 | Company Inc | Senior PM
+- [!] https://private.url/job — Error: login required
 
 ## Processed
-- [x] #008 | https://... | Company | Role | 4.3/5 | PDF ❌
-- [!] #009 | https://... | Company | Role — SKIP (comp $80K < $100K floor)
+- [x] #143 | https://jobs.example.com/posting/789 | Acme Corp | AI PM | 4.2/5 | PDF ✅
+- [x] #144 | https://boards.greenhouse.io/xyz/jobs/012 | BigCo | SA | 2.1/5 | PDF ❌
 ```
 
----
+## Intelligent JD detection from URL
 
-## Casos especiales en JD detection
+1. **Playwright (preferred):** `browser_navigate` + `browser_snapshot`. Works with all SPAs.
+2. **WebFetch (fallback):** For static pages or when Playwright is unavailable.
+3. **WebSearch (last resort):** Search in secondary portals that index the JD.
 
-1. **Playwright (preferido):** `browser_navigate` + `browser_snapshot`. Funciona con SPAs.
-2. **WebFetch (fallback):** Para páginas estáticas.
-3. **WebSearch (último recurso):** `"{company} {role} job description 2026"`
+**Special cases:**
+- **LinkedIn**: May require login → mark `[!]` and ask the user to paste the text
+- **PDF**: If the URL points to a PDF, read it directly with the Read tool
+- **`local:` prefix**: Read the local file. Example: `local:jds/linkedin-pm-ai.md` → read `jds/linkedin-pm-ai.md`
 
-- **LinkedIn:** Puede requerir login → marcar `[!]` y pedir al usuario que pegue el texto
-- **PDF:** URL apunta a PDF → leer con Read tool
-- **`local:` prefix:** `local:jds/role.md` → leer `jds/role.md`
+## Automatic numbering
+
+1. List all files in `reports/`
+2. Extract the number from the prefix (e.g., `142-medispend...` → 142)
+3. New number = maximum found + 1
+
+## Source synchronization
+
+Before processing any URL, verify sync:
+```bash
+node cv-sync-check.mjs
+```
+If there is a desynchronization, warn the user before continuing.
