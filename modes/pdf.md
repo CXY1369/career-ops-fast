@@ -189,16 +189,18 @@ qlmanage -t -s 1200 -o /tmp/ output/<one-pdf>.pdf
 and Read the resulting PNG to confirm layout. Only then batch.
 
 **Rule 3 — PDF sanity signals (check every generation):**
-| Signal | Healthy (CSS applied) | Broken (CSS leaked as text) |
+| Signal | Healthy (CSS applied + fonts embedded) | Broken (CSS leaked as text) |
 |--------|------------------------|------------------------------|
 | Pages | 1–2 | 3+ (CSS not applied → content overflows) |
-| `/BaseFont` in PDF | `Helvetica*` (sans-serif → CSS `font-family` applied) | `Times-Roman` (serif default → no CSS at all) |
+| `/FontName` in PDF | `*+SpaceGrotesk*`, `*+DMSans*` (subsetted webfonts embedded) | `Times-Roman` in `/BaseFont` (serif default → no CSS at all) |
 | Visual (thumbnail) | gradient line, cyan section headers, pill-shaped competency tags | wall of raw `@font-face`/CSS text |
 
-Quick audit command:
+Quick audit command (look at `/FontName`, NOT `/BaseFont` — see caveat below):
 ```bash
-node -e "const s=require('fs').readFileSync(process.argv[1]).toString('latin1'); console.log('fonts:', [...new Set((s.match(/\\/BaseFont \\/[^ \\/\\n]+/g)||[]))]);" output/<pdf>
+node -e "const s=require('fs').readFileSync(process.argv[1]).toString('latin1'); console.log('FontName:', [...new Set((s.match(/\\/FontName\\s*\\/[^ \\/\\n>]+/g)||[]))]);" output/<pdf>
 ```
-The decisive split is **Times-Roman (broken) vs Helvetica (CSS applied)**. Confirm with a `qlmanage` thumbnail (Rule 2).
+A healthy PDF lists `SpaceGrotesk` + `DMSans` subsets. The CSS-leak failure mode instead shows `Times-Roman` under `/BaseFont`. Always confirm with a `qlmanage` thumbnail (Rule 2).
 
-**KNOWN BUG (2026-04-23):** The self-hosted woff2 fonts (Space Grotesk / DM Sans) currently fail to load in `generate-pdf.mjs` (`document.fonts` reports `error`), so output falls back to Helvetica. Layout/colors are unaffected. This is cosmetic, not the CSS-leak bug. Fix tracked separately — do NOT treat Helvetica as a failure signal until the webfont loader is fixed.
+**FIXED (was KNOWN BUG 2026-04-23):** The self-hosted woff2 fonts (Space Grotesk / DM Sans) used to fail to load in `generate-pdf.mjs` (`document.fonts` reported `error`) because `page.setContent()` gives the document an opaque origin, so Chromium blocked the `file://` font subresources and output fell back to Helvetica. `generate-pdf.mjs` now inlines each `./fonts/*.woff2` as a base64 `data:` URI before rendering, which is origin-independent — `document.fonts` reports `loaded` and the real Space Grotesk / DM Sans glyphs are embedded.
+
+**Audit caveat:** With fonts now embedded, Chromium's Skia PDF backend emits **Type3 fonts** (glyph outlines), so the PDF no longer contains `/BaseFont … Helvetica` — the `/BaseFont` row above and the quick-audit command will come back empty on a *healthy* PDF. Don't read that as a failure. To confirm typography, use the `qlmanage` thumbnail (Rule 2) or check `document.fonts` status (`loaded`, not `error`). The `Times-Roman` signal still flags the CSS-leak bug.
