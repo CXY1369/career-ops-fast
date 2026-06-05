@@ -13,7 +13,7 @@
 import { chromium } from 'playwright';
 import { resolve, dirname } from 'path';
 import { readFile } from 'fs/promises';
-import { mkdirSync } from 'fs';
+import { mkdirSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -123,20 +123,34 @@ async function generatePDF() {
   console.log(`📁 Output: ${outputPath}`);
   console.log(`📏 Format: ${format.toUpperCase()}`);
 
-  // Read HTML to inject font paths as absolute file:// URLs
+  // Read HTML and inline self-hosted fonts as base64 data: URIs.
+  //
+  // Why not file:// URLs: page.setContent() gives the document an opaque
+  // origin, so Chromium blocks file:// subresource loads for security and the
+  // @font-face faces fall back to Helvetica (all faces report `error`). Data
+  // URIs are origin-independent and the most robust approach for headless PDF.
   let html = await readFile(inputPath, 'utf-8');
 
   // Resolve font paths relative to career-ops/fonts/
   const fontsDir = resolve(__dirname, 'fonts');
+  const FONT_MIME = { woff2: 'font/woff2', woff: 'font/woff', ttf: 'font/ttf', otf: 'font/otf' };
+  let fontsInlined = 0;
   html = html.replace(
-    /url\(['"]?\.\/fonts\//g,
-    `url('file://${fontsDir}/`
+    /url\(['"]?\.\/fonts\/([^'")]+)\.(woff2|woff|ttf|otf)['"]?\)/g,
+    (match, name, ext) => {
+      try {
+        const b64 = readFileSync(resolve(fontsDir, `${name}.${ext}`)).toString('base64');
+        fontsInlined++;
+        return `url('data:${FONT_MIME[ext]};base64,${b64}')`;
+      } catch {
+        console.warn(`⚠️  Font not found, leaving reference unchanged: fonts/${name}.${ext}`);
+        return match;
+      }
+    }
   );
-  // Close any unclosed quotes from the replacement (handles all font formats)
-  html = html.replace(
-    /file:\/\/([^'")]+)\.(woff2?|ttf|otf)['"]?\)/g,
-    `file://$1.$2')`
-  );
+  if (fontsInlined > 0) {
+    console.log(`🔤 Inlined ${fontsInlined} font face${fontsInlined === 1 ? '' : 's'} as data URIs`);
+  }
 
   // Normalize text for ATS compatibility (issue #1)
   const normalized = normalizeTextForATS(html);

@@ -138,7 +138,7 @@ Escribir `/tmp/apply-config-{company-slug}.json`:
 ## Paso 6 — Lanzar Playwright
 
 ```bash
-cd /Users/xingyuchen/.../career-ops
+cd /path/to/career-ops
 node apply-form.mjs /tmp/apply-config-{company-slug}.json
 ```
 
