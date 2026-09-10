@@ -1,0 +1,23 @@
+---
+description: career-ops project instructions — auto-loaded on every request
+alwaysApply: true
+---
+
+# Career-Ops Project Rules (Cursor adapter)
+
+This project is CLI-agnostic. The canonical instructions live in `AGENTS.md`
+at the project root — read it first on every session, before responding.
+
+@AGENTS.md
+
+## Cursor-specific notes
+
+- Slash commands like `/career-ops`, `/career-ops-scan`, `/career-ops-apply`
+  are aliases for the skill in `.agents/skills/career-ops/SKILL.md`.
+  In Cursor Composer, type them literally and the skill will load.
+- User personalization lives in `modes/_profile.md` and `config/profile.yml` —
+  never edit `modes/_shared.md` for user-specific content.
+- User-layer files (`cv.md`, `config/profile.yml`, `modes/_profile.md`,
+  `data/*`, `reports/*`, `output/*`) are gitignored and never auto-updated.
+
+@.agents/skills/career-ops/SKILL.md
