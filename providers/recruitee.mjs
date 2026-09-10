@@ -7,6 +7,8 @@
 // regex match on `<safe-slug>.recruitee.com` rather than a static
 // allowlist.
 
+import { htmlToText } from './_html-to-text.mjs';
+
 const RECRUITEE_HOST_RE = /^[a-z0-9][a-z0-9-]*\.recruitee\.com$/;
 
 function assertRecruiteeUrl(url) {
@@ -61,15 +63,24 @@ export default {
  * Recruitee returns:
  *   { offers: [{ title, careers_url?, url?, city?, country?, remote?, location? }] }
  *
- * - url: prefer `careers_url`, fall back to `url`; validated against
- *   `https://<safe-slug>.recruitee.com` — an off-domain or non-HTTPS URL is
+ * - url: prefer `careers_url`, fall back to `url`. Recruitee tenants commonly
+ *   serve postings on their own custom domain (e.g. `careers.hostaway.com`),
+ *   so this URL is NOT host-locked to `*.recruitee.com`. Unlike the API
+ *   endpoint, the per-offer URL is display-only — it is written to the pipeline
+ *   and scan history but never server-fetched here, so the SSRF rationale does
+ *   not apply. It is sourced from the already-validated tenant API response.
+ *   Requirement: a well-formed `https:` URL; a non-HTTPS or malformed URL is
  *   dropped (empty string returned per the Job contract).
  * - location: prefer the explicit `location` field; else assemble from
  *   city/country, appending "Remote" when `remote` is true.
+ * - description: Recruitee's list payload embeds each offer's full HTML body
+ *   for free (same request — verified against a live board), so it is
+ *   stripped to plain text here and feeds scan.mjs's content_filter /
+ *   visa_filter. Omitted when the offer carries no usable body.
  *
  * @param {any} json
  * @param {string} companyName
- * @returns {Array<{title: string, url: string, company: string, location: string}>}
+ * @returns {Array<{title: string, url: string, company: string, location: string, description?: string}>}
  */
 export function parseRecruiteeResponse(json, companyName) {
   const offers = json?.offers;
@@ -79,14 +90,20 @@ export function parseRecruiteeResponse(json, companyName) {
     const country = j.country || '';
     const remote = j.remote ? 'Remote' : '';
     const location = j.location || [city, country, remote].filter(Boolean).join(', ');
+    const description = htmlToText(j.description);
 
-    // Validate offer URL: must parse as https://<safe-slug>.recruitee.com/...
+    // Resolve offer URL. Recruitee tenants commonly publish postings on their
+    // own custom domain (e.g. careers.hostaway.com), so the per-offer URL is
+    // NOT host-locked to *.recruitee.com — it is display-only (recorded in the
+    // pipeline/history, never server-fetched here) and comes from the already-
+    // validated tenant API response. Require only a well-formed https: URL;
+    // a non-https or malformed URL is dropped (empty string per the Job contract).
     let url = '';
     const rawUrl = j.careers_url || j.url || '';
     if (typeof rawUrl === 'string' && rawUrl) {
       try {
         const parsed = new URL(rawUrl);
-        if (parsed.protocol === 'https:' && RECRUITEE_HOST_RE.test(parsed.hostname)) {
+        if (parsed.protocol === 'https:') {
           url = parsed.href;
         }
       } catch {
@@ -99,6 +116,7 @@ export function parseRecruiteeResponse(json, companyName) {
       url,
       location,
       company: companyName,
+      ...(description ? { description } : {}),
     };
   });
 }
