@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<!-- career-ops-template
+name: Mine
+version: 1.0.0
+description: Xingyu Chen's traditional serif design — centered header, section titles with underline, two-row job header (title bold / company | location .... date), tight vertical rhythm. ATS-first.
+-->
+<html lang="{{LANG}}">
+<head>
+<meta charset="UTF-8">
+<title>{{NAME}} — CV</title>
+<style>
+  /* ── Mine ─────────────────────────────────────────────────────────────────
+     Traditional academic/industry serif CV. Modeled on Xingyu's original
+     August-2026 Word→PDF resume:
+
+       - centered name (large, bold), thin centered contact line
+       - one-line centered summary directly under contact
+       - section titles: Title Case, bold, followed by a thin horizontal rule
+       - two-row job header: Role Title (bold) on row 1,
+         "Company | Location ................ Date" on row 2 (company bold,
+         date right-aligned)
+       - mid-dot bullets (·), tight vertical rhythm
+       - single column, no colour, no graphics — 100% ATS-safe
+
+     ATS discipline copied from Jake:
+       - static system serif stack (never a bundled variable-woff2 whose glyph
+         advances make PDF extractors inject spaces mid-word)
+       - ligatures disabled so "verification" is not extracted as "veriﬁcation"
+  */
+
+  :root {
+    --accent-color: #000000;
+    --font-family: "Liberation Serif", 'Times New Roman', Georgia, 'DejaVu Serif', serif;
+    --font-size: 10.5px;
+    --page-margin: 0.5in;
+  }
+  @page { margin: var(--page-margin); }
+
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "clig" 0, "dlig" 0;
+  }
+
+  html {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  body {
+    font-family: var(--font-family);
+    font-size: var(--font-size);
+    line-height: 1.45;
+    color: #000000;
+    background: #ffffff;
+    font-variant-ligatures: none;
+  }
+
+  .page {
+    max-width: {{PAGE_WIDTH}};
+    margin: 0 auto;
+    background: #ffffff;
+  }
+
+  /* === HEADER === */
+  .header { text-align: center; margin-bottom: 8px; }
+  .header h1 {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: 0.005em;
+    line-height: 1.1;
+    margin-bottom: 3px;
+  }
+  .contact-row { font-size: 10px; line-height: 1.5; }
+  .contact-row a { color: #000000; text-decoration: none; }
+  .separator { margin: 0 3px; }
+
+  /* === SUMMARY (centered, single line) === */
+  .summary-text {
+    text-align: center;
+    margin: 3px 0 6px 0;
+    font-size: 10.5px;
+    padding: 0 0.3in;
+  }
+
+  /* === SECTIONS ===
+     Title Case, bold, underlined by a thin rule that runs the full width — the
+     signature detail of Xingyu's original design. */
+  .section { margin-bottom: 8px; }
+
+  .section-title {
+    font-size: 14px;
+    font-weight: 700;
+    text-transform: none;
+    letter-spacing: 0.005em;
+    border-bottom: 0.7px solid #000000;
+    padding-bottom: 1px;
+    margin-bottom: 4px;
+  }
+
+  /* === CORE COMPETENCIES ===
+     No pills — competencies render inline as a single text flow so ATS
+     extracts them as one keyword line. Same as Jake. */
+  .competencies-grid { line-height: 1.5; }
+  .competency-tag { display: inline; white-space: nowrap; }
+  .competency-tag::after { content: "  \2022  "; }
+  .competency-tag:last-child::after { content: ""; }
+
+  /* === WORK EXPERIENCE ===
+     Two-row header, but INVERTED from Jake:
+       Row 1: Role Title (bold, left-aligned).
+       Row 2: "Company | Location" (company bold, italic location) on the left,
+              date on the right.
+     This mirrors the original PDF and reads as "what you did → where and when". */
+  .job { margin-bottom: 7px; }
+  .job:last-child { margin-bottom: 0; }
+
+  .job-role {
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.35;
+  }
+
+  .job-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 10.5px;
+    line-height: 1.35;
+  }
+
+  .job-company { font-weight: 700; }
+  .job-location { font-style: normal; }
+  .job-period { white-space: nowrap; }
+
+  .job ul {
+    margin-top: 2px;
+    padding-left: 14px;
+    list-style: none;
+  }
+
+  .job li {
+    margin-bottom: 1.5px;
+    padding-left: 0;
+    position: relative;
+    text-indent: -10px;
+    margin-left: 10px;
+  }
+
+  /* Mid-dot bullet — matches the original PDF exactly */
+  .job li::before {
+    content: "\00B7";       /* · */
+    padding-right: 6px;
+    font-weight: 700;
+  }
+
+  /* === PROJECTS === */
+  .project { margin-bottom: 5px; }
+  .project-title { font-size: 10.5px; font-weight: 700; }
+  .project-badge {
+    font-size: 10px;
+    font-style: italic;
+    font-weight: 400;
+    margin-left: 5px;
+  }
+  .project-desc { margin-top: 1px; }
+  .project ul {
+    margin-top: 1px;
+    padding-left: 14px;
+    list-style: none;
+  }
+  .project li {
+    margin-bottom: 1.5px;
+    padding-left: 0;
+    text-indent: -10px;
+    margin-left: 10px;
+  }
+  .project li::before {
+    content: "\00B7";
+    padding-right: 6px;
+    font-weight: 700;
+  }
+  .project-tech { font-size: 10px; font-style: italic; margin-top: 1px; }
+
+  /* === PUBLICATIONS === */
+  .pub-item { margin-bottom: 3px; padding-left: 10px; text-indent: -10px; }
+  .pub-item::before { content: "\00B7"; padding-right: 6px; font-weight: 700; }
+
+  /* === EDUCATION ===
+     Same two-row layout as Work Experience: degree/school on row 1,
+     date right-aligned; secondary line for department/honors/location. */
+  .edu-item { margin-bottom: 4px; }
+  .edu-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .edu-title { font-weight: 700; font-size: 11px; }
+  .edu-org { font-weight: 400; font-style: italic; }
+  .edu-year { white-space: nowrap; font-size: 10.5px; }
+  .edu-location { font-size: 10.5px; font-style: italic; }
+  .edu-desc { margin-top: 1px; font-size: 10px; }
+
+  /* === SKILLS ===
+     Category label bold + inline content — one line per category. Same shape
+     as the original PDF. */
+  .skills-grid { display: block; }
+  .skill-item { margin-bottom: 1.5px; }
+  .skill-category { font-weight: 700; }
+
+  /* === PAGE BREAK CONTROL === */
+  .header,
+  .edu-item,
+  .competency-tag,
+  .skill-item {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .section-title,
+  .job-role,
+  .job-company,
+  .project-title {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <div class="header">
+    <h1>{{NAME}}</h1>
+    <div class="contact-row">
+      <span>{{EMAIL}}</span>
+      <span class="separator">|</span>
+      <span>{{PHONE}}</span>
+      <span class="separator">|</span>
+      <a href="{{LINKEDIN_URL}}">{{LINKEDIN_DISPLAY}}</a>
+      <span class="separator">|</span>
+      <a href="{{PORTFOLIO_URL}}">{{PORTFOLIO_DISPLAY}}</a>
+      <span class="separator">|</span>
+      <span>{{LOCATION}}</span>
+    </div>
+    <div class="summary-text">{{SUMMARY_TEXT}}</div>
+  </div>
+
+  <!-- SKILLS (near top — matches the original PDF's ordering) -->
+  <div class="section">
+    <div class="section-title">Skills</div>
+    {{SKILLS}}
+  </div>
+
+  <!-- WORK EXPERIENCE -->
+  <div class="section">
+    <div class="section-title">Work Experience</div>
+    {{EXPERIENCE}}
+  </div>
+
+  <!-- PROJECTS -->
+  <div class="section">
+    <div class="section-title">Projects</div>
+    {{PROJECTS}}
+  </div>
+
+  <!-- PUBLICATIONS -->
+  <div class="section">
+    <div class="section-title">Publications &amp; Conferences</div>
+    {{PUBLICATIONS}}
+  </div>
+
+  <!-- EDUCATION -->
+  <div class="section">
+    <div class="section-title">Education</div>
+    {{EDUCATION}}
+  </div>
+
+</div>
+</body>
+</html>
