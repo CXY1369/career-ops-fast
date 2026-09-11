@@ -34,6 +34,12 @@ import { normalizeTextKey } from './tracker-parse.mjs';
  */
 export { OWNERLESS_GRACE_MS } from './pipeline-lock.mjs';
 
+// Invisible control characters that would corrupt a Markdown table cell.
+// Backported from upstream/main so verify-pipeline.mjs's check 16 (added
+// post-v1.32; see #3892) can import it without upgrading the full file.
+// eslint-disable-next-line no-control-regex
+export const CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g;
+
 /**
  * Rebuild a markdown table row from the cells produced by `line.split('|')`.
  *

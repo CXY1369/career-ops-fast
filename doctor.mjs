@@ -12,12 +12,70 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import * as yaml from 'js-yaml';
 import dotenv from 'dotenv';
-import { discoverPlugins, pluginRoots, pluginStatus } from './plugins/_engine.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
-import { resolveExtractorMode } from './browser-extract.mjs';
-import { parseConfigByExtension } from './jsonc-parse.mjs';
 import { validateFlags } from './lib/cli-flags.mjs';
-import { geminiNodeFloor } from './lib/gemini-node-floor.mjs';
+
+// Optional imports — modules absent from this fork after the v1.32 partial
+// upgrade (plugin engine + browser extractor + jsonc + gemini-node-floor each
+// have dep chains 6-15 files deep that we do not use). Each stub keeps
+// doctor.mjs runnable while degrading its specific check gracefully; a real
+// value is preferred whenever the module happens to be present.
+//
+// Catch is narrow on purpose: ONLY ERR_MODULE_NOT_FOUND degrades. A syntax
+// error or runtime bug inside a present module rethrows, so doctor still
+// fails loudly on real problems instead of silently mislabeling them as
+// "module missing".
+//
+// Stub SHAPES matter — they must match the real function's contract at every
+// call site, not merely be truthy. `geminiNodeFloor` in particular returns
+// `null` when the CLI is not Gemini (the real function's documented behavior
+// and how downstream .filter(Boolean) drops it) — an earlier truthy stub
+// broke the human-mode renderer with "✗ undefined" while --json still passed.
+const _MISSING_OPTIONAL = [];
+function _tolerateMissing(err, name) {
+  if (err?.code !== 'ERR_MODULE_NOT_FOUND') throw err;
+  _MISSING_OPTIONAL.push(name);
+}
+let discoverPlugins, pluginRoots, pluginStatus;
+try {
+  ({ discoverPlugins, pluginRoots, pluginStatus } = await import('./plugins/_engine.mjs'));
+} catch (err) {
+  _tolerateMissing(err, 'plugins/_engine.mjs');
+  discoverPlugins = () => [];                       // no plugins visible → "Plugins: none installed"
+  pluginRoots = () => [];
+  pluginStatus = () => ({ enabled: false, ok: true, note: 'plugin engine unavailable' });
+}
+let resolveExtractorMode;
+try {
+  ({ resolveExtractorMode } = await import('./browser-extract.mjs'));
+} catch (err) {
+  _tolerateMissing(err, 'browser-extract.mjs');
+  resolveExtractorMode = () => 'unknown';           // extractor-mode check surfaces "unknown"
+}
+let parseConfigByExtension;
+try {
+  ({ parseConfigByExtension } = await import('./jsonc-parse.mjs'));
+} catch (err) {
+  _tolerateMissing(err, 'jsonc-parse.mjs');
+  // Fallback: strict JSON only. .jsonc/comments/trailing-commas unsupported;
+  // caller sees null (same as the real parser's failure return) and the check
+  // that owns this call already treats null as "config not readable".
+  parseConfigByExtension = (file, content) => {
+    if (file.endsWith('.json')) { try { return JSON.parse(content); } catch { return null; } }
+    return null;
+  };
+}
+let geminiNodeFloor;
+try {
+  ({ geminiNodeFloor } = await import('./lib/gemini-node-floor.mjs'));
+} catch (err) {
+  _tolerateMissing(err, 'lib/gemini-node-floor.mjs');
+  // Real behavior: return null unless activeCli === 'gemini' (see
+  // lib/gemini-node-floor.mjs in career-ops-v1.32.0). A non-Gemini CLI's
+  // check result is filtered out by the caller — matching that with `null`
+  // keeps the human-mode renderer happy; a truthy stub breaks it.
+  geminiNodeFloor = () => null;
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -680,6 +738,23 @@ async function main() {
     console.log(`${yellow('⚠')} ${cliWarning}`);
   }
 
+  // Human-mode counterpart to the degraded-mode warning surfaced in --json's
+  // warnings[]. Without this, a user running `node doctor.mjs` would see
+  // "✓ Plugins: none installed" and misread it as verified when it actually
+  // means "we could not tell because the plugin engine is missing" (see
+  // stub note at top of file).
+  if (_MISSING_OPTIONAL.length > 0) {
+    warnings++;
+    console.log(`${yellow('⚠')} Doctor running in degraded mode — optional dependency missing: ${_MISSING_OPTIONAL.join(', ')}`);
+    const affected = [
+      _MISSING_OPTIONAL.includes('plugins/_engine.mjs') && 'plugins (stubbed as empty list)',
+      _MISSING_OPTIONAL.includes('browser-extract.mjs') && 'extractor mode',
+      _MISSING_OPTIONAL.includes('jsonc-parse.mjs') && '.jsonc config parsing (strict .json still works)',
+      _MISSING_OPTIONAL.includes('lib/gemini-node-floor.mjs') && 'Gemini Node.js version floor',
+    ].filter(Boolean).join('; ');
+    console.log(`  ${dim('→ Related checks were stubbed, not run. Fields affected: ' + affected + '.')}`);
+  }
+
   for (const result of checks) {
     const fixes = Array.isArray(result.fix) ? result.fix : result.fix ? [result.fix] : [];
     if (result.warn) {
@@ -827,6 +902,19 @@ function onboardingState(root) {
     ...(mcpCheck?.warn ? [`${mcpCheck.label}\n→ ${[].concat(mcpCheck.fix || []).join('\n  ')}`] : []),
     ...(bakCheck.warn ? [`${bakCheck.label}\n→ ${[].concat(bakCheck.fix || []).join('\n  ')}`] : []),
     ...unpersonalized.map((u) => `${u.path} ${u.reason} — ${u.impact}\n→ Personalize it from cv.md before running evaluations.`),
+    // Degraded-check disclosure: when an optional module is missing (v1.32
+    // partial-upgrade fallout), the check that used it was stubbed rather
+    // than run. Callers must not read a stubbed-empty result as verified —
+    // e.g. `"plugins": []` is either genuinely empty or "we could not tell";
+    // this warning is the difference.
+    ...(_MISSING_OPTIONAL.length > 0 ? [`Doctor running in degraded mode — optional dependency missing: ${_MISSING_OPTIONAL.join(', ')}\n→ Related checks were stubbed, not run. Fields affected: ${
+      [
+        _MISSING_OPTIONAL.includes('plugins/_engine.mjs') && 'plugins (stubbed as empty list)',
+        _MISSING_OPTIONAL.includes('browser-extract.mjs') && 'extractor mode',
+        _MISSING_OPTIONAL.includes('jsonc-parse.mjs') && '.jsonc config parsing (strict .json still works)',
+        _MISSING_OPTIONAL.includes('lib/gemini-node-floor.mjs') && 'Gemini Node.js version floor',
+      ].filter(Boolean).join('; ')
+    }.`] : []),
   ];
 
   const playwrightMcp = activeCli !== 'unknown' && MCP_CONFIGS.find((c) => c.cli === activeCli)
