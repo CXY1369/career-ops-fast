@@ -283,6 +283,29 @@ export function roleFuzzyMatch(a, b) {
     if (extraTokens.some(w => !BASELINE_TOKENS.has(w))) return false;
   }
 
+  // A content word on EACH side that the other title lacks is two
+  // disagreements, not a loose rewrite of one opening. The subset guard above
+  // only sees a word on one side, and the Jaccard cut-off below cannot see
+  // this at all: three shared words plus one unique word per side score
+  // exactly 0.6. "Customer Success Manager, Enterprise" vs "Customer Success
+  // Manager, Commercial" (and "Machine Learning Engineer, Vision" vs "...,
+  // Speech") therefore matched, and merge-tracker folded the second
+  // requisition into the first, overwriting its score, date and report link.
+  //
+  // #4058 added this guard for the one case where a level sat on one side
+  // only ("Front Desk Assistant (Summer Housing)" vs "Administrative
+  // Assistant II (Housing Front Desk)"); the vocabulary disagreement is the
+  // signal, the level was only how that report found it. Mirrors the subset
+  // guard: baseline-only differences do not split, and neither does a plural
+  // ("Solution Architecture" vs "Solutions Architecture").
+  const setA = new Set(wordsA);
+  const isPluralOf = (x, y) => x === `${y}s` || y === `${x}s`;
+  const uniqueA = wordsA.filter(w => !setB.has(w) && !BASELINE_TOKENS.has(w));
+  const uniqueB = wordsB.filter(w => !setA.has(w) && !BASELINE_TOKENS.has(w));
+  const unmatchedA = uniqueA.filter(x => !uniqueB.some(y => isPluralOf(x, y)));
+  const unmatchedB = uniqueB.filter(y => !uniqueA.some(x => isPluralOf(x, y)));
+  if (unmatchedA.length > 0 && unmatchedB.length > 0) return false;
+
   // Use a true set-based Jaccard ratio. Dividing by the smaller title inflates
   // matches for roles that share a long generic prefix but differ in specialty.
   const union = new Set([...wordsA, ...wordsB]).size;

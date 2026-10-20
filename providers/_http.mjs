@@ -2,18 +2,121 @@
 // Files prefixed with _ are never loaded as providers by scan.mjs.
 
 import './_dns-cache.mjs'; // memoize dns.lookup process-wide (see that file)
+import { isIP } from 'node:net';
 import {
   DEFAULT_USER_AGENT,
   BROWSER_LIKE_USER_AGENT,
   MACOS_BROWSER_LIKE_USER_AGENT,
 } from '../user-agent.mjs';
-import { providerFetchContext } from './_ip-guard.mjs';
+import { providerFetchContext, isBlockedAddress, blockedAddressError } from './_ip-guard.mjs';
+import { currentConnectionScope } from './_connection-scope.mjs';
+import { normalizeUrl, aggregatorPostingId } from '../url-key.mjs';
+
+/** @typedef {import('./_types.js').Context} Context */
+/** @typedef {import('./_types.js').FetchOptions} FetchOptions */
+/**
+ * An `Error` carrying the HTTP response metadata this module attaches on a
+ * non-2xx: `status`, the raw `body`, the `Retry-After` value, and (only under
+ * `redirect: 'manual'`) the `Location` it would have followed. `attempts` is
+ * added by the retry loop — the real request count, not the `retries + 1`
+ * ceiling.
+ *
+ * @typedef {Error & { status?: number, body?: string, retryAfter?: (string | null), location?: (string | null), attempts?: number }} HttpError
+ */
 
 export { BROWSER_LIKE_USER_AGENT, MACOS_BROWSER_LIKE_USER_AGENT };
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+const MAX_TIMER_MS = 2_147_483_647; // setTimeout rewrites anything above this to 1ms
 
-async function fetchWithTimeout(url, opts = {}, consume) {
+/**
+ * Resolve the default per-request timeout from the environment.
+ *
+ * 10s suits almost every board, but a provider that returns its whole catalogue
+ * in one response can legitimately need longer, and when it does the abort
+ * surfaces as an unreachable portal rather than as a timeout — so the board
+ * reads as broken instead of slow. Raising the budget is a deployment concern
+ * rather than a code change, so it is read from the environment.
+ *
+ * Unusable values fall back to the default rather than failing a scan at
+ * request time: a typo in an env var should not take the scanner down.
+ *
+ * "Unusable" includes anything outside setTimeout's honored range, not just
+ * values that fail to parse. A delay below 1ms or above 2_147_483_647ms is
+ * silently rewritten to 1ms, so accepting one would abort every request almost
+ * immediately — the failure this variable exists to prevent, arrived at by a
+ * typo instead of a slow board. Falling back is the quieter outcome: a scan at
+ * the 10s default beats a scan where every portal reads as unreachable.
+ *
+ * @param {unknown} raw - Raw env value (CAREER_OPS_HTTP_TIMEOUT_MS).
+ * @param {number} [fallback=10_000] - Value used when `raw` is unusable.
+ * @returns {number} Milliseconds.
+ */
+export function resolveDefaultTimeoutMs(raw, fallback = 10_000) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > MAX_TIMER_MS) return fallback;
+  return parsed;
+}
+
+const DEFAULT_TIMEOUT_MS = resolveDefaultTimeoutMs(process.env.CAREER_OPS_HTTP_TIMEOUT_MS);
+let proxyAgent;
+let proxySignature;
+
+async function proxyFor(url) {
+  if (process.env.CAREER_OPS_TRUST_PROXY_EGRESS !== '1') return { dispatcher: undefined, proxyHost: undefined };
+  const target = new URL(url);
+  const httpProxy = process.env.http_proxy || process.env.HTTP_PROXY || '';
+  const httpsProxy = process.env.https_proxy || process.env.HTTPS_PROXY || httpProxy;
+  const noProxy = process.env.no_proxy || process.env.NO_PROXY || '';
+  const proxyUrl = target.protocol === 'https:' ? httpsProxy : httpProxy;
+  if (!proxyUrl) return { dispatcher: undefined, proxyHost: undefined };
+  for (const configuredProxy of [httpProxy, httpsProxy]) {
+    if (!configuredProxy) continue;
+    const parsed = new URL(configuredProxy);
+    if ((parsed.username || parsed.password) && parsed.protocol !== 'https:') {
+      throw new Error('Proxy URLs containing credentials must use HTTPS to protect proxy authentication.');
+    }
+  }
+  const proxyHost = new URL(proxyUrl).hostname.replace(/^\[|\]$/g, '');
+  // The agent honours NO_PROXY and is scoped to this one provider request.
+  // Unrelated fetches keep their normal dispatcher. A direct NO_PROXY request
+  // still resolves its destination under the provider DNS guard.
+  const signature = [process.env.http_proxy, process.env.HTTP_PROXY, process.env.https_proxy,
+    process.env.HTTPS_PROXY, process.env.no_proxy, process.env.NO_PROXY].join('\0');
+  // Existing installations can keep direct transport without installing undici.
+  // Resolve the optional transport only after both the trust flag and proxy URL.
+  const { EnvHttpProxyAgent, fetch: undiciFetch } = await import('undici').catch((cause) => {
+    throw new Error('Trusted proxy egress requires undici; run npm install in the career-ops directory, then retry.', { cause });
+  });
+  if (signature !== proxySignature) {
+    proxyAgent = new EnvHttpProxyAgent({ httpProxy, httpsProxy, noProxy });
+    proxySignature = signature;
+  }
+  return { dispatcher: proxyAgent, proxyHost, fetchImpl: undiciFetch };
+}
+
+/**
+ * Run a fetch under an `AbortController` timeout, inside the provider-fetch
+ * async context so the patched DNS lookup validates the addresses it resolves.
+ * `consume` reads the body while the timer is still armed.
+ *
+ * @param {string} url
+ * @param {FetchOptions} [opts]
+ * @param {(res: Response) => Promise<any>} consume
+ * @param {boolean} [allowManualRedirectResponse]
+ * @returns {Promise<any>}
+ */
+async function fetchWithTimeout(url, opts = {}, consume, allowManualRedirectResponse = false) {
+  const targetHost = new URL(url).hostname.replace(/^\[|\]$/g, '');
+  const { dispatcher, proxyHost, fetchImpl } = await proxyFor(url);
+  // A literal IP host never reaches dns.lookup, so the lookup-time guard in
+  // _ip-guard.mjs never sees it: http://127.0.0.1/, http://[::ffff:127.0.0.1]/
+  // and http://2130706433/ were all dialled on the direct path while
+  // http://localhost/ was refused. Check the literal here, on every path, not
+  // only behind a proxy. `new URL()` has already normalised the integer, octal
+  // and hex spellings of IPv4 to a dotted quad, and isBlockedAddress unwraps
+  // the IPv4-mapped IPv6 form.
+  if (isIP(targetHost) && isBlockedAddress(targetHost)) throw blockedAddressError(targetHost, targetHost);
   // Mark this request as provider traffic for the whole of its async life, so
   // the patched dns.lookup validates the addresses it resolves (#3096). The
   // guard is scoped rather than global because _dns-cache.mjs patches
@@ -24,21 +127,69 @@ async function fetchWithTimeout(url, opts = {}, consume) {
   // starts it: the DNS lookup happens inside connect, well after the
   // synchronous part of fetch() has returned, and the context has to still be
   // entered when it does.
-  return providerFetchContext.run({ url: String(url) }, () => fetchInContext(url, opts, consume));
+  return providerFetchContext.run({ url: String(url), targetHost, proxyHost },
+    () => fetchInContext(url, opts, consume, dispatcher, allowManualRedirectResponse, fetchImpl));
 }
 
-async function fetchInContext(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method = 'GET', body = null, redirect = 'follow' } = {}, consume) {
+// redirect defaults to 'error': a provider fetch must never follow a 3xx, or a
+// server-side redirect could point the request at a private address after the
+// ip guard already passed the original host (#4079). Callers that really need
+// to follow redirects opt in explicitly.
+/**
+ * @param {string} url
+ * @param {FetchOptions} [opts]
+ * @param {(res: Response) => Promise<any>} consume
+ * @param {import('undici').Dispatcher} [dispatcher]
+ * @param {boolean} [allowManualRedirectResponse]
+ * @param {typeof fetch} [fetchImpl] undici's fetch when a proxy dispatcher is used; global fetch otherwise.
+ * @returns {Promise<any>}
+ */
+async function fetchInContext(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method = 'GET', body = null, redirect = 'error', onResponse } = {}, consume, dispatcher, allowManualRedirectResponse = false, fetchImpl = fetch) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
-      method,
-      headers: { 'user-agent': DEFAULT_USER_AGENT, ...headers },
-      body,
-      redirect,
-      signal: controller.signal,
-    });
-    if (!res.ok) {
+    // Defaults go through Headers so a caller's override wins whatever its
+    // capitalization. An object spread only replaces an identical key: a caller's
+    // 'User-Agent' sat beside the default 'user-agent', and fetch JOINED the two
+    // into one comma-separated value instead of replacing it.
+    const requestHeaders = new Headers(headers);
+    if (!requestHeaders.has('user-agent')) requestHeaders.set('user-agent', DEFAULT_USER_AGENT);
+    // accept-encoding is pinned to the codecs undici decodes correctly.
+    // Left unset, Node negotiates zstd, and amazon.jobs' zstd response comes
+    // back TRUNCATED AT 1024 BYTES with a 200 status — so the failure surfaces
+    // as an unrelated-looking "Unterminated string in JSON at position 1024"
+    // rather than a transport error. curl on the same URL returns the full
+    // ~900KB. Callers can still override via `headers`.
+    if (!requestHeaders.has('accept-encoding')) requestHeaders.set('accept-encoding', 'gzip, deflate, br');
+    // A sweep runs each board inside withConnectionScope() so its sockets are
+    // released when the board is done (see _connection-scope.mjs). The scope
+    // brings its own fetch: undici's Agent is only safe with undici's fetch.
+    // A trusted-proxy dispatcher, when configured, still takes precedence,
+    // together with the fetchImpl proxyFor() paired it with.
+    const scope = dispatcher ? undefined : currentConnectionScope();
+    let res;
+    try {
+      res = await (scope ? scope.fetch : fetchImpl)(url, {
+        method,
+        headers: requestHeaders,
+        body,
+        redirect,
+        signal: controller.signal,
+        dispatcher: dispatcher ?? scope?.agent,
+      });
+    } catch (err) {
+      if (!dispatcher && ['ENOTFOUND', 'EAI_AGAIN'].includes(err?.cause?.code)
+        && (process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY)) {
+        err.message += ' (proxy variables are set but provider requests use direct fetch; set CAREER_OPS_TRUST_PROXY_EGRESS=1 only if your proxy blocks private destination addresses)';
+      }
+      throw err;
+    }
+    onResponse?.(res);
+    const isInspectableManualRedirect = allowManualRedirectResponse
+      && redirect === 'manual'
+      && res.status >= 300
+      && res.status < 400;
+    if (!res.ok && !isInspectableManualRedirect) {
       const responseText = await res.text().catch(() => '');
       // WAF/CDN challenge pages (seen live: Workday 429s) carry no actionable
       // text — HTML markup or a generic interstitial message, not worth
@@ -69,6 +220,14 @@ async function fetchInContext(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {
   }
 }
 
+/**
+ * Fetch and parse a JSON response, with the shared timeout and non-2xx guard.
+ *
+ * @param {string} url
+ * @param {FetchOptions} [opts]
+ * @returns {Promise<any>} Parsed JSON.
+ * @throws {HttpError} On a non-2xx response.
+ */
 export async function fetchJson(url, opts = {}) {
   return fetchWithTimeout(url, opts, (res) => res.json());
 }
@@ -83,8 +242,9 @@ export async function fetchJson(url, opts = {}) {
  * this stops at maxBytes and cancels the body.
  *
  * @param {string} url
- * @param {{maxBytes?: number}} [opts]
+ * @param {{ maxBytes?: number }} [opts]
  * @returns {Promise<string>} The first maxBytes of the body, decoded as UTF-8.
+ * @throws {HttpError} On a non-2xx response.
  */
 export async function fetchTextHead(url, opts = {}) {
   const maxBytes = opts.maxBytes ?? 8192;
@@ -111,6 +271,14 @@ export async function fetchTextHead(url, opts = {}) {
   });
 }
 
+/**
+ * Fetch a response body as text, with the shared timeout and non-2xx guard.
+ *
+ * @param {string} url
+ * @param {FetchOptions} [opts]
+ * @returns {Promise<string>}
+ * @throws {HttpError} On a non-2xx response.
+ */
 export async function fetchText(url, opts = {}) {
   return fetchWithTimeout(url, opts, (res) => res.text());
 }
@@ -118,11 +286,14 @@ export async function fetchText(url, opts = {}) {
 // Returns a Response (after the timeout + non-2xx guard) so providers that need
 // response headers — csod.mjs reads Set-Cookie to prime the session its search
 // API requires — can route through ctx instead of re-implementing fetch. Pass
-// redirect:'error' like every other provider call so a 3xx can't be followed to
-// a private IP.
+// redirect:'error' is the default here like everywhere else, so a 3xx can't be
+// followed to a private IP.
 //
 // The body is read here, inside the timer window, and handed back as an
-// equivalent Response. Two reasons: returning the live Response would let a
+// equivalent Response. Under redirect:'manual', a 3xx is also returned so a
+// stateful provider can inspect and validate Location before following it;
+// fetchText/fetchJson retain their existing structured-error contract. Two
+// reasons the response is reconstructed: returning the live Response would let a
 // server that stalls its body hang the caller forever with the abort timer
 // already cleared (the failure fetchWithTimeout documents above), and this
 // function previously omitted the `consume` argument entirely, so it threw
@@ -130,11 +301,22 @@ export async function fetchText(url, opts = {}) {
 // preserve bug-compatibility with. Header identity, including repeated
 // Set-Cookie (getSetCookie()), survives the reconstruction.
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+/**
+ * Like {@link fetchJson} / {@link fetchText}, but resolves to a reconstructed
+ * `Response` (body already read inside the timeout window) so a provider can
+ * read response headers — csod.mjs reads Set-Cookie to prime its session. Pass
+ * `redirect: 'error'` like every other provider call.
+ *
+ * @param {string} url
+ * @param {FetchOptions} [opts]
+ * @returns {Promise<Response>}
+ * @throws {HttpError} On a non-2xx response.
+ */
 export async function fetchResponse(url, opts = {}) {
   return await fetchWithTimeout(url, opts, async (res) => {
     const body = NULL_BODY_STATUSES.has(res.status) ? null : await res.text();
     return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
-  });
+  }, true);
 }
 
 /** Jitter added to a backoff so concurrent retries don't re-collide in lockstep. */
@@ -162,7 +344,16 @@ const RETRY_DEFAULTS = { retries: 2, baseDelayMs: 500, maxDelayMs: 8_000 };
  */
 const REDIRECT_REFUSAL_CAUSE_MESSAGE = 'unexpected redirect';
 
-/** Awaitable sleep that honours a ctx-supplied clock, so tests never wall-clock wait. */
+/**
+ * Awaitable sleep that honours a ctx-supplied clock, so tests never wall-clock
+ * wait. `ctx` is the SECOND argument — a swapped `sleep(ctx, ms)` hands an
+ * object to `setTimeout` and resolves on the next tick instead of pacing.
+ *
+ * @param {number} ms - Delay in milliseconds.
+ * @param {{ sleep?: (ms: number) => Promise<void> }} [ctx] - Transport context; a
+ *   `sleep` clock on it (tests supply one) is awaited instead of `setTimeout`.
+ * @returns {Promise<void>}
+ */
 export function sleep(ms, ctx) {
   if (typeof ctx?.sleep === 'function') return ctx.sleep(ms);
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -171,6 +362,9 @@ export function sleep(ms, ctx) {
 /**
  * Milliseconds from a Retry-After header, in either permitted form (delta
  * seconds or an HTTP-date). Null when absent or unparseable.
+ *
+ * @param {(string | null | undefined)} value - Raw `Retry-After` header value.
+ * @returns {(number | null)}
  */
 export function parseRetryAfterMs(value) {
   if (!value) return null;
@@ -211,6 +405,9 @@ export function isRefusedRedirectError(err) {
  * TypeError with no .status — the same shape as a transient network error —
  * but it's deterministic and will never succeed on retry. See
  * isRefusedRedirectError() above for how it's distinguished.
+ *
+ * @param {any} err - A thrown value: an Error with an optional `.status`, or anything else.
+ * @returns {boolean}
  */
 export function isRetryableError(err) {
   const status = err?.status;
@@ -245,8 +442,9 @@ export function isRetryableError(err) {
  * #1639).
  *
  * @param {() => Promise<any>} request - Performs one attempt.
- * @param {{sleep?: Function}} ctx - Transport context (may supply a test clock).
- * @param {{retries?: number, baseDelayMs?: number, maxDelayMs?: number}} [policy]
+ * @param {{ sleep?: (ms: number) => Promise<void> }} ctx - Transport context (may supply a test clock).
+ * @param {{ retries?: number, baseDelayMs?: number, maxDelayMs?: number }} [policy]
+ * @returns {Promise<any>} Whatever `request` resolves to on its first success.
  */
 async function withRetry(request, ctx, policy = {}) {
   const { retries, baseDelayMs, maxDelayMs } = { ...RETRY_DEFAULTS, ...policy };
@@ -286,10 +484,10 @@ async function withRetry(request, ctx, policy = {}) {
 /**
  * Fetch JSON with bounded retry on transient failures.
  *
- * @param {{fetchJson: Function, sleep?: Function}} ctx - Transport context.
+ * @param {{ fetchJson: (url: string, opts?: FetchOptions) => Promise<any>, sleep?: (ms: number) => Promise<void> }} ctx - Transport context.
  * @param {string} url - Absolute URL.
- * @param {object} [opts] - Passed through to ctx.fetchJson.
- * @param {{retries?: number, baseDelayMs?: number, maxDelayMs?: number}} [policy]
+ * @param {FetchOptions} [opts] - Passed through to ctx.fetchJson.
+ * @param {{ retries?: number, baseDelayMs?: number, maxDelayMs?: number }} [policy]
  * @returns {Promise<any>} Parsed JSON.
  */
 export async function fetchJsonWithRetry(ctx, url, opts = {}, policy = {}) {
@@ -309,21 +507,70 @@ export async function fetchJsonWithRetry(ctx, url, opts = {}, policy = {}) {
  * DNS/TLS/connection blip on it failed the whole provider before a single
  * page was ever fetched.
  *
- * @param {{fetchText: Function, sleep?: Function}} ctx - Transport context.
+ * @param {{ fetchText: (url: string, opts?: FetchOptions) => Promise<string>, sleep?: (ms: number) => Promise<void> }} ctx - Transport context.
  * @param {string} url - Absolute URL.
- * @param {object} [opts] - Passed through to ctx.fetchText.
- * @param {{retries?: number, baseDelayMs?: number, maxDelayMs?: number}} [policy]
+ * @param {FetchOptions} [opts] - Passed through to ctx.fetchText.
+ * @param {{ retries?: number, baseDelayMs?: number, maxDelayMs?: number }} [policy]
  * @returns {Promise<string>} Response body.
  */
 export async function fetchTextWithRetry(ctx, url, opts = {}, policy = {}) {
   return withRetry(() => ctx.fetchText(url, opts), ctx, policy);
 }
 
-export function makeHttpCtx() {
-  return {
+/**
+ * Fetch a raw Response (headers included — e.g. Set-Cookie) with bounded
+ * retry on transient failures. Same policy as fetchJsonWithRetry /
+ * fetchTextWithRetry; exists for providers that need response headers on a
+ * retried request (a stateful multi-hop scrape carrying a session cookie
+ * across GET/POST steps, e.g. peoplesoft.mjs) instead of just the body.
+ *
+ * @param {{fetchResponse: Function, sleep?: Function}} ctx - Transport context.
+ * @param {string} url - Absolute URL.
+ * @param {object} [opts] - Passed through to ctx.fetchResponse.
+ * @param {{retries?: number, baseDelayMs?: number, maxDelayMs?: number}} [policy]
+ * @returns {Promise<Response>}
+ */
+export async function fetchResponseWithRetry(ctx, url, opts = {}, policy = {}) {
+  return withRetry(() => ctx.fetchResponse(url, opts), ctx, policy);
+}
+
+/**
+ * Build the default HTTP transport context passed to `provider.fetch()` when
+ * no test stub is injected.
+ *
+ * @param {{ onRequest?: () => void, onResponse?: (status: number) => void }} [observer]
+ * @returns {Context}
+ */
+export function makeHttpCtx(observer) {
+  const ctx = {
     transport: 'http',
     fetchJson,
     fetchText,
     fetchResponse,
+    // The canonical posting-URL key, so a provider can deduplicate its own
+    // results the way the tracker and scanner do. Handing it over through ctx
+    // is what keeps the behaviour identical: `url-key.mjs` is dependency-free,
+    // so a standalone provider receives the same function the core calls rather
+    // than importing the file or copying its body (#4218).
+    normalizePostingUrl: normalizeUrl,
+    // The requisition id an aggregator URL carries, for the same reason: a
+    // provider that reads LinkedIn or Indeed links gets the extractor the
+    // tracker's merge uses, not a regex of its own that drifts from it.
+    aggregatorPostingId,
   };
+  if (!observer) return ctx;
+  for (const method of ['fetchJson', 'fetchText', 'fetchResponse']) {
+    const original = ctx[method];
+    ctx[method] = (url, opts = {}) => {
+      observer.onRequest?.();
+      return original(url, {
+        ...opts,
+        onResponse: response => {
+          opts.onResponse?.(response);
+          observer.onResponse?.(response.status);
+        },
+      });
+    };
+  }
+  return ctx;
 }
