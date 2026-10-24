@@ -4,7 +4,7 @@
  * outcome.mjs — Record application outcomes, archive artifacts, and sync tracker (#1722).
  *
  * Usage:
- *   node outcome.mjs <report#|company> <outcome_type> [--stage "..."] [--feedback "..."] [--note "..."] [--role "..."] [--cv "..."] [--cover "..."] [--dry-run] [--json]
+ *   node outcome.mjs <tracker#|company> <outcome_type> [--stage "..."] [--feedback "..."] [--note "..."] [--role "..."] [--cv "..."] [--cover "..."] [--dry-run] [--json]
  *
  * Outcomes:
  *   interview_progress | offer_received | hired | offer_declined | rejected | no_response | interview_only
@@ -83,9 +83,9 @@ function today() {
 }
 
 
-const USAGE = `Usage: node outcome.mjs <report#|company> <outcome_type> [options]
+const USAGE = `Usage: node outcome.mjs <tracker#|company> <outcome_type> [options]
 
-  <report#|company>  Tracker selector (# or company name)
+  <tracker#|company> Tracker selector (# or company name)
   <outcome_type>     interview_progress | offer_received | hired | offer_declined | rejected | no_response | interview_only
   --stage "..."      Stage reached (e.g. "Tech Screen", "Final Round")
   --feedback "..."   Verbatim candidate/recruiter feedback

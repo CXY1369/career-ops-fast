@@ -268,6 +268,8 @@ Taslağı şu şekilde bitir: "Bu nasıl okunuyor? Onayladığınız an PDF'i ol
 
 Yalnızca kullanıcının açık onayı (explicit user approval) geldikten sonra.
 
+Fact gate, bu mektup için adayın kendi yanıtlarını da kaynak sayar. Adım 5 ve Adım 6 yanıtlarını `user_inputs` alanına olduğu gibi kopyala. Adayın orada yazdığı bir sayı, mektup onu bir plan olarak yazdığında geçerlidir. İşveren, unvan, araç veya geçmiş deneyim için kanıt `cv.md` ya da `article-digest.md` içinde olmalıdır. Sayı `cv.md`, `article-digest.md` ve `user_inputs` içinde yoksa PDF üretilmez. Kapıdan geçmek için adayın cümlesini değiştirme ve bir planı `cv.md` dosyasına ekleme.
+
 JSON yükünü (payload) birleştir:
 
 ```json
@@ -296,6 +298,13 @@ JSON yükünü (payload) birleştir:
     "closing": "{approved closing}",
     "language_closing": "{approved language sentence or null}"
   },
+  "user_inputs": [
+    "{Adım 5 yanıtı, olduğu gibi}",
+    "{Adım 6 A yanıtı, olduğu gibi}",
+    "{Adım 6 B yanıtı, olduğu gibi}",
+    "{Adım 6 C yanıtı, olduğu gibi}",
+    "{Adım 6 D yanıtı, olduğu gibi}"
+  ],
   "output_path": "output/{company-slug}-{role-slug}-cover.pdf"
 }
 ```

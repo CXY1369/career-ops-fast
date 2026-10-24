@@ -8,15 +8,15 @@
  * copies — and every writer excludes every other writer through the same lock.
  */
 
-import { readFileSync, writeFileSync, renameSync, rmSync, statSync, lstatSync, existsSync, realpathSync, chmodSync, appendFileSync, openSync, fstatSync, readSync, closeSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, rmSync, statSync, lstatSync, existsSync, realpathSync, readlinkSync, accessSync, constants as fsConstants, chmodSync, appendFileSync, openSync, fstatSync, readSync, closeSync } from 'fs';
 import { join, dirname, basename, resolve, relative, isAbsolute, sep } from 'path';
 import { createHash, randomUUID } from 'crypto';
 import { tmpdir } from 'os';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 // The lock protocol is lib/dir-lock.mjs, shared with every other core lock.
 // This module only picks the tracker's lock directory, timing and error.
 import { acquireDirLock } from './lib/dir-lock.mjs';
-import { normalizeTextKey } from './tracker-parse.mjs';
+import { normalizeTextKey, firstLinkTarget } from './tracker-parse.mjs';
 
 /**
  * Minimum age before directory age alone may condemn an ownerless lock or
@@ -74,9 +74,8 @@ export function rebuildRow(parts) {
  *   it resolves, or its targets could not be inspected conclusively.
  */
 export function findDeadReportLink(reportCell, trackerDir, dataRoot, options = {}) {
-  const match = String(reportCell ?? '').match(/\]\(([^)]+)\)/);
-  if (!match) return null;
-  const link = match[1];
+  const link = firstLinkTarget(reportCell);
+  if (link == null) return null;
   const inspect = options.stat ?? statSync;
   const errors = [];
   const trackerDirs = Array.isArray(trackerDir) ? trackerDir : [trackerDir];
@@ -545,7 +544,7 @@ export async function acquireTrackerLock(lockDir, options = {}) {
     removeLock: typeof options.removeLock === 'function' ? options.removeLock : undefined,
     onRecoverGuard: testWaitingMarker
       ? () => writeFileSync(testWaitingMarker, JSON.stringify({
-        pid: process.pid, lockDir, guardCreated: true,
+        pid: process.pid, ppid: process.ppid, lockDir, guardCreated: true,
       }), { flag: 'wx' })
       : undefined,
     // Tagged so callers can tell "lock is busy, retry later" apart from
@@ -692,12 +691,15 @@ export function renameSyncWithRetry(tmpPath, path, rename = renameSync) {
 export function writeFileAtomic(path, content, { mode } = {}) {
   const tmpPath = join(dirname(path), `.${basename(path)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`);
   try {
+    // flush: fsync before the rename, so a write error that surfaces only at
+    // sync time (ENOSPC on some filesystems), or a crash, cannot leave the
+    // rename durable and the data not.
     if (mode === undefined) {
-      writeFileSync(tmpPath, content);
+      writeFileSync(tmpPath, content, { flush: true });
     } else {
       // Creation honours the umask, so it can only narrow `mode`; chmod then
       // sets it exactly.
-      writeFileSync(tmpPath, content, { mode });
+      writeFileSync(tmpPath, content, { mode, flush: true });
       chmodSync(tmpPath, mode);
     }
     renameSyncWithRetry(tmpPath, path);
@@ -705,6 +707,51 @@ export function writeFileAtomic(path, content, { mode } = {}) {
     rmSync(tmpPath, { force: true });
     throw err;
   }
+}
+
+/**
+ * Replace a hand-edited user file (cv.md, article-digest.md, portals.yml)
+ * atomically, keeping what an in-place write kept.
+ *
+ * A bare writeFileSync truncates the file before writing it, so a crash or a
+ * full disk mid-write leaves the user's only copy empty or cut short. The
+ * atomic replacement is a new file, which would otherwise turn a symlinked
+ * cv.md into a regular file and drop the file's permissions; writing through
+ * the real path and carrying the mode over keeps both. A symlink whose target
+ * does not exist yet (article-digest.md before its first entry) is followed by
+ * hand, since realpathSync cannot resolve it, so the target is created.
+ *
+ * @param {string} path - The file to replace (may be a symlink, or not exist yet).
+ * @param {string} content - Complete file content to write.
+ * @returns {void}
+ */
+export function replaceUserFile(path, content) {
+  const target = userFileWriteTarget(path);
+  const exists = existsSync(target);
+  // A rename only needs the directory to be writable, so it would replace a
+  // file the user made read-only. The in-place write refused; so does this
+  // (throws EACCES/EPERM).
+  if (exists) accessSync(target, fsConstants.W_OK);
+  const mode = exists ? statSync(target).mode & 0o777 : undefined;
+  writeFileAtomic(target, content, { mode });
+}
+
+/**
+ * The file replaceUserFile() should write: the real path, or for a dangling
+ * symlink chain the path at its end, which an in-place write would have created.
+ *
+ * @param {string} path
+ * @returns {string}
+ */
+function userFileWriteTarget(path) {
+  let current = canonicalizeTrackerPath(path);
+  for (let hops = 0; hops < 40; hops++) {
+    let stat;
+    try { stat = lstatSync(current); } catch { return current; }
+    if (!stat.isSymbolicLink()) return current;
+    current = resolve(dirname(current), readlinkSync(current));
+  }
+  throw new Error(`${path}: too many levels of symbolic links`);
 }
 
 /**
@@ -763,7 +810,7 @@ export function appendLedgerRows(path, text) {
  * @returns {{id:string,label:string,aliases:string[],description:string,terminal:boolean}[]} Parsed state entries.
  */
 export function loadCanonicalStates(statesPath) {
-  const doc = yaml.load(readFileSync(statesPath, 'utf-8'));
+  const doc = loadYaml(readFileSync(statesPath, 'utf-8'));
   if (!doc || !Array.isArray(doc.states)) {
     throw new Error(`Malformed states file at ${statesPath}: expected a top-level "states" list`);
   }

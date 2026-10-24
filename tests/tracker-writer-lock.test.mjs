@@ -347,7 +347,11 @@ function writerCase({
           + 'longer reached on contention'));
         assert.equal(marker.lockDir, lockDir, say('the marker names a different lock'));
         assert.equal(marker.guardCreated, true, say('the marker does not record the recover guard being created'));
-        assert.equal(marker.pid, runPid, say('the marker came from a different process'));
+        // A writer that delegates its write to set-status.mjs (reply-watch,
+        // #5536) contends in that child, so the marker is the child's. Only
+        // such a case accepts a marker whose parent is the writer.
+        assert.equal(options.delegatesWrite ? marker.ppid : marker.pid, runPid,
+          say('the marker came from a different process'));
       });
     }
 
@@ -461,6 +465,7 @@ writerCase({
 writerCase({
   name: 'reply-watch',
   script: 'reply-watch.mjs',
+  delegatesWrite: true,
   stdin: 'y\n',
   content: trackerTable([
     '| 1 | 2026-01-01 | Acme | Engineer | 4.0/5 | Applied | ❌ | [1](reports/001-acme.md) | contact hr@acme.com |',
@@ -472,6 +477,7 @@ writerCase({
 writerCase({
   name: 'reply-watch-identical',
   script: 'reply-watch.mjs',
+  delegatesWrite: true,
   stdin: 'y\n',
   candidates: [
     {
@@ -500,6 +506,7 @@ writerCase({
 writerCase({
   name: 'reply-watch-stale-status',
   script: 'reply-watch.mjs',
+  delegatesWrite: true,
   stdin: 'y\n',
   content: trackerTable([
     '| 1 | 2026-01-01 | Acme | Engineer | 4.0/5 | Applied | ❌ | [1](reports/001-acme.md) | contact hr@acme.com |',

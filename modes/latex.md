@@ -4,9 +4,12 @@ Export a tailored, ATS-optimized CV as a `.tex` file and compile it to PDF via `
 
 ## Pipeline
 
+**Locked Sections:** If `cv.locked_sections` is defined in `profile.yml`, NEVER remove, shorten, or paraphrase those sections during CV generation or tailoring. They must appear verbatim. (Note: Programmatic validation of locked sections is enforced in the HTML/PDF pipeline; it is not yet covered in the LaTeX pipeline.)
+
 1. Read `cv.md` as source of truth
 2. Read `config/profile.yml` for candidate identity and contact info
 3. Ask the user for the JD if not already in context (text or URL)
+   For a new posting (no tracker row yet), run `node precheck-duplicate.mjs` once first with the posting's company, title and any `--url` / `--req`, passed as quoted variables or an argument array exactly as in `modes/pdf.md` step 2 (read-only, advisory), and surface any hit before drafting.
 4. Extract 15-20 keywords from the JD
 5. Use `language.output` for the CV language. The JD language and `language.modes_dir` supply market vocabulary and evaluation context, but never override the configured output language.
 6. Detect role archetype → adapt framing

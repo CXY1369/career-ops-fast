@@ -793,7 +793,7 @@ The TSV carries:
 - Company — the END employer. If the JD is agency-mediated ("our client", agency domain, no employer named), ASK the user which agency it came through, use `?` as Company, and put a distinguishing descriptor in Notes (e.g. `fintech, Leeds`). Never write "Confidential" — the `?` marker is locale-invariant and can't collide with a real firm.
 - Via — the agency/recruiter firm the user confirmed; leave it out for a direct application. In the TSV it is a `via` column (see the TSV format spec). The merge can only store it in a tracker that has a Via column: when the user confirmed an agency and the tracker has none, run `node merge-tracker.mjs --migrate-via` first, otherwise the merge warns and drops the value.
 - Role
-- Score: copy the already-decided 1–5 Global Score from the report header and Machine Summary `score`. Apply any `modes/_custom.md` Scoring Rules when deciding that score, not again while writing the tracker. A–H are report sections, not scores to average.
+- Score: copy the already-decided 1–5 Global Score from the report header and Machine Summary `score`. Apply the user's scoring rules from `modes/_profile.md` and `modes/_custom.md` when deciding that score, not again while writing the tracker. A–H are report sections, not scores to average.
 - Status: `Evaluated`
 - PDF: ❌ (or ✅ if auto-pipeline generated PDF)
 - Report: root-relative link `[001](reports/001-company-2026-01-01.md)` (when merged via `merge-tracker.mjs` it is normalized to be relative to the tracker's own dir, e.g. `../reports/...`; see #760)

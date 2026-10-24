@@ -22,7 +22,7 @@ const LOCALES = [
   { file: 'modes/da/oferta.md', score: '**Score:** {X/5}', decision: '**Beslutning:** {Søg | Overvej | Undersøg først | Spring over}', lede: '{sætningen om at søge, kopieret ordret}', apply: 'Søg' },
   { file: 'modes/de/angebot.md', score: '**Score:** {X/5}', decision: '**Entscheidung:** {Bewerben | Prüfen | Zuerst recherchieren | Überspringen}', lede: '{der Bewerbungssatz, wortgleich kopiert}', apply: 'Bewerben' },
   { file: 'modes/es/oferta.md', score: '**Score:** {X/5}', decision: '**Decisión:** {Presentarse | Valorar | Investigar primero | Descartar}', lede: '{la frase de `## Veredicto (lead)`, copiada tal cual}', apply: 'Presentarse' },
-  { file: 'modes/fr/offre.md', score: '**Score :** {X/5}', decision: '**Décision:** {Postuler | Envisager | Chercher d\'abord | Passer}', lede: '{la phrase postuler ou non, copiée telle quelle}', apply: 'Postuler' },
+  { file: 'modes/fr/offre.md', score: '**Score:** {X/5}', decision: '**Décision:** {Postuler | Envisager | Chercher d\'abord | Passer}', lede: '{la phrase postuler ou non, copiée telle quelle}', apply: 'Postuler' },
   { file: 'modes/hi/naukri.md', score: '**Score:** {X/5}', decision: '**निर्णय:** {आवेदन करें | विचार करें | पहले जाँचें | छोड़ें}', lede: '{आवेदन वाला वाक्य, ज्यों का त्यों}', apply: 'आवेदन करें' },
   { file: 'modes/id/lowongan.md', score: '**Score:** {X/5}', decision: '**Keputusan:** {Lamar | Pertimbangkan | Teliti dulu | Lewati}', lede: '{kalimat lamar atau tidak, disalin apa adanya}', apply: 'Lamar' },
   { file: 'modes/it/annuncio.md', score: '**Punteggio:** {X/5}', decision: '**Decisione:** {Candidarsi | Valutare | Approfondire prima | Scartare}', lede: '{la frase candidarsi o no, copiata parola per parola}', apply: 'Candidarsi' },

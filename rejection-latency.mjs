@@ -48,7 +48,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 
 import { parseActiveInterviews, findColumn } from './process-quality.mjs';
 import { resolveColumns, parseTrackerRow, normalizeTextKey } from './tracker-parse.mjs';
@@ -212,7 +212,7 @@ export function groupIdentity(company, via) {
 export function loadProfile(profilePath = PROFILE_FILE) {
   if (!profilePath || !existsSync(profilePath)) return {};
   try {
-    return yaml.load(readFileSync(profilePath, 'utf-8')) || {};
+    return loadYaml(readFileSync(profilePath, 'utf-8')) || {};
   } catch {
     return {};
   }

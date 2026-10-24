@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { outputLanguageInstruction, parseOutputLanguage } from './profile-language.mjs';
 import { TSV_ADDITION_HEADER } from './tracker-parse.mjs';
 import { normalizedTrackerScore } from './lib/tracker-addition.mjs';
@@ -38,6 +38,7 @@ import { createAdmissionGate, formatSkipCounts } from './lib/admission-gate.mjs'
 import { localToday } from './lib/local-today.mjs';
 import { getCareerOpsRoot, getProfilePath } from './path-resolver.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { withJdArchiveSection } from './lib/jd-archive-section.mjs';
 import { locateApplyReport } from './apply-scope.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -501,7 +502,7 @@ async function fetchJobPage(url) {
 export function parsePortals(rawOverride) {
   const raw = rawOverride ?? readFile('portals.yml');
   if (!raw) throw new Error('portals.yml not found');
-  const config = yaml.load(raw) || {};
+  const config = loadYaml(raw) || {};
 
   // The shared predicate rather than a second copy of the matching rules. This
   // path kept its own `includes` loop, and the two had drifted three ways: an
@@ -677,6 +678,9 @@ async function cmdEvaluate(input, ctx) {
   const modeContent = readSystemFile('modes/oferta.md') ?? readSystemFile('modes/auto-pipeline.md') ?? '';
 
   let jdText = input;
+  // The posting text alone, for the report's verbatim archive: jdText gains a
+  // `URL:` line for the model when the input is a link.
+  let archiveText = input;
 
   if (!input) {
     // Interactive paste mode
@@ -692,12 +696,14 @@ async function cmdEvaluate(input, ctx) {
       rl.close();
     }
     jdText = lines.join('\n');
+    archiveText = jdText;
     if (!jdText.trim()) { console.log('No input provided.'); return null; }
   } else if (input.startsWith('http')) {
     console.log('Fetching job page...');
     try {
       const content = await fetchJobPage(input);
       jdText = `URL: ${input}\n\n${content}`;
+      archiveText = content;
     } catch (e) {
       console.error(e.message);
       return null;
@@ -739,7 +745,7 @@ async function cmdEvaluate(input, ctx) {
     // Extract Legitimacy from LLM output or fall back to placeholder
     const legitMatch = result.match(/\*\*Legitimacy:\*\*\s*([^\n]+)/);
     const legitLine  = legitMatch ? `**Legitimacy:** ${legitMatch[1].trim()}` : '**Legitimacy:** unconfirmed';
-    writeFile(relPath, `**URL:** ${input || '(pasted)'}\n${legitLine}\n\n${result}`);
+    writeFile(relPath, `**URL:** ${input || '(pasted)'}\n${legitLine}\n\n${withJdArchiveSection(result, archiveText)}`);
 
     // Capture the DENOMINATOR when the model writes one. The old pattern took
     // only the numeric prefix, so `Score: 8/10` yielded `8` and the cell became

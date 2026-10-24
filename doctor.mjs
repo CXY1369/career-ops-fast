@@ -10,24 +10,50 @@ import { execFileSync } from 'child_process';
 import { homedir } from 'os';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'js-yaml';
-import dotenv from 'dotenv';
-import { AGENT_CLIS } from './lib/agent-cli.mjs';
 import { findTitleFilterConflicts } from './lib/title-filter-conflicts.mjs';
 import { sectionState, scanHeadings, SECTIONS } from './lib/personalization.mjs';
 import { discoverPlugins, pluginRoots, pluginStatus } from './plugins/_engine.mjs';
 import { getCareerOpsRoot, getProfilePath, hasProfileOverride } from './path-resolver.mjs';
-import { validateProfile, EXAMPLE_PATH } from './validate-profile.mjs';
-import { resolveExtractorMode } from './browser-extract.mjs';
 import { parseConfigByExtension } from './jsonc-parse.mjs';
-import { validateFlags } from './lib/cli-flags.mjs';
+import { validateFlags, flagValue } from './lib/cli-flags.mjs';
 import { geminiNodeFloor } from './lib/gemini-node-floor.mjs';
 import { SKILL_ENTRYPOINTS } from './scaffolder/bin/skill-entrypoints.mjs';
 import { nodeFloor } from './lib/node-floor.mjs';
+import { classifyChromiumLaunchError } from './lib/chromium-launch-error.mjs';
 import { findExperienceSections, parseCompanyHeading, EXPERIENCE_HEADING_NAMES } from './lib/cv-markdown.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
+
+// Modules that import an npm package (directly or through their own imports)
+// load here, after the fact, instead of as static imports. A static import of
+// a missing package fails while Node links the module graph, before a single
+// line of this file runs, so a copy with no node_modules (a ZIP download, a
+// copy made without `npm install`) died with a raw ERR_MODULE_NOT_FOUND stack
+// from the very check that exists to report missing dependencies. Loading them
+// dynamically lets that failure be caught and reported with the fix.
+let hasYamlContent, loadYaml, dotenv, AGENT_CLIS, validateProfile, EXAMPLE_PATH, resolveExtractorMode;
+try {
+  [
+    { hasYamlContent, loadYaml },
+    { default: dotenv },
+    { AGENT_CLIS },
+    { validateProfile, EXAMPLE_PATH },
+    { resolveExtractorMode },
+  ] = await Promise.all([
+    import('./lib/yaml-document.mjs'),
+    import('dotenv'),
+    import('./lib/agent-cli.mjs'),
+    import('./validate-profile.mjs'),
+    import('./browser-extract.mjs'),
+  ]);
+} catch (err) {
+  let missing = [];
+  try { missing = findMissingDependencies(__dirname); } catch { /* no readable package.json: rethrow below */ }
+  if (err?.code !== 'ERR_MODULE_NOT_FOUND' || missing.length === 0) throw err;
+  console.error(`career-ops dependencies are not installed in ${__dirname} (missing: ${missing.join(', ')}), so doctor cannot run its checks.\nFix: run \`npm install\` in ${__dirname}, then run doctor again.`);
+  process.exit(1);
+}
 
 // CLIs the doctor recognises.
 
@@ -38,7 +64,9 @@ const argv = process.argv.slice(2);
 // flags before --help so `--help --bogus` still errors.
 const KNOWN_FLAGS = ['--target', '--json', '--init-templates', '--strict', '--cli', '--help', '-h'];
 
-// Both take their value as the next argv token.
+// Both take a value, as the next argv token or as `--flag=value`. validateFlags
+// accepts either form, so both are read with flagValue(): an indexOf() lookup
+// cannot see `--target=<path>` and would diagnose this checkout instead.
 const VALUE_FLAGS = ['--target', '--cli'];
 
 const USAGE = `Usage:
@@ -53,15 +81,14 @@ const USAGE = `Usage:
 CLIs: ${AGENT_CLIS.join(', ')}`;
 
 // requireOperand: without it, `--target --json` reads --json as the target
-// path (argv[targetIdx + 1] below has no adjacency check of its own), and the
+// path (flagValue() below takes the next token as-is), and the
 // doctor silently diagnoses a directory literally named "--json" at exit 0
 // (#3087) — this is the onboarding entrypoint, so that's a user told to
 // create files that already exist. Nothing more specific to say than the
 // shared message.
 validateFlags(argv, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS, requireOperand: true });
 
-const targetIdx = argv.indexOf('--target');
-const explicitTarget = targetIdx !== -1 && argv[targetIdx + 1] ? argv[targetIdx + 1] : null;
+const explicitTarget = flagValue(argv, '--target') || null;
 const projectRoot = explicitTarget || getCareerOpsRoot();
 // --target diagnoses a whole other checkout, so that checkout's profile is the
 // one that counts; otherwise CAREER_OPS_PROFILE applies as it does everywhere.
@@ -99,8 +126,7 @@ if (INIT_TEMPLATES && !JSON_OUT) {
 // Opt-in so the default `npm run doctor` stays fast and fully offline.
 const STRICT = argv.includes('--strict');
 
-const cliIdx = argv.indexOf('--cli');
-const cliFlag = cliIdx !== -1 ? argv[cliIdx + 1] : null;
+const cliFlag = flagValue(argv, '--cli') ?? null;
 
 // ANSI colors (only on TTY)
 const isTTY = process.stdout.isTTY;
@@ -381,15 +407,55 @@ function playwrightInstallFix() {
   return 'Run: npx playwright install chromium';
 }
 
+// Missing shared libraries are a host problem, not a download problem: the
+// browser is there and `npx playwright install` skips it. Playwright's own
+// remedy is install-deps, which installs system packages and so needs root.
+// It only knows apt (#4223), so on any other Linux it would fail with
+// "apt-get: command not found"; there the distro's own package manager is the
+// fix.
+function isDebianLike() {
+  try {
+    const osRelease = readFileSync('/etc/os-release', 'utf-8');
+    return /^(?:ID|ID_LIKE)=.*\b(?:debian|ubuntu)\b/m.test(osRelease);
+  } catch {
+    return false;
+  }
+}
+
+function playwrightDepsFix() {
+  if (existsSync('/etc/NIXOS')) return playwrightInstallFix();
+  // On Windows the missing pieces are Media Foundation DLLs. install-deps
+  // installs them through Playwright's install_media_pack.ps1, which enables a
+  // Windows Server feature and so needs an administrator shell; Windows N
+  // editions lack them by design and need Microsoft's Media Feature Pack.
+  if (process.platform === 'win32') {
+    return [
+      'Run in an administrator terminal: npx playwright install-deps chromium',
+      'On a Windows N edition, install the Media Feature Pack from Microsoft instead (Settings → Apps → Optional features).',
+    ];
+  }
+  if (process.platform === 'linux' && !isDebianLike()) {
+    return 'Install the packages that provide these libraries with your distribution\'s package manager. `npx playwright install-deps` uses apt-get, so it only works on Debian and Ubuntu.';
+  }
+  const sudo = process.platform !== 'win32' && process.getuid?.() ? 'sudo ' : '';
+  return `Run: ${sudo}npx playwright install-deps chromium`;
+}
+
 async function checkPlaywright() {
   let chromium;
   try {
     ({ chromium } = await import('playwright'));
-  } catch {
+  } catch (err) {
+    // The package itself is missing or broken, so there is no browser to
+    // install yet: `npx playwright install` would fetch a CLI whose version
+    // need not match the one package.json pins.
+    const notFound = err?.code === 'ERR_MODULE_NOT_FOUND';
     return {
       pass: false,
-      label: 'Playwright chromium not installed',
-      fix: playwrightInstallFix(),
+      label: notFound
+        ? 'Playwright chromium could not be checked: the playwright package is not installed'
+        : `Playwright chromium could not be checked: the playwright package failed to load (${String(err?.message ?? err).split('\n')[0]})`,
+      fix: 'Run: npm install',
     };
   }
   // Validate by launching — chromium.executablePath() points at Chrome for Testing
@@ -401,11 +467,30 @@ async function checkPlaywright() {
   try {
     browser = await chromium.launch({ headless: true });
     return { pass: true, label: 'Playwright chromium installed' };
-  } catch {
+  } catch (err) {
+    // Only a missing binary is fixed by installing it. Everything else means
+    // the binary is present and failed to start, so the advice follows the
+    // error Playwright reported instead of repeating a no-op install.
+    const cause = classifyChromiumLaunchError(err);
+    if (cause.kind === 'missing-executable') {
+      return {
+        pass: false,
+        label: 'Playwright chromium not installed',
+        fix: playwrightInstallFix(),
+      };
+    }
+    if (cause.kind === 'missing-libraries') {
+      const which = cause.libraries.length ? ` (${cause.libraries.join(', ')})` : '';
+      return {
+        pass: false,
+        label: `Playwright chromium is installed but cannot start: the system libraries it needs are missing${which}`,
+        fix: playwrightDepsFix(),
+      };
+    }
     return {
       pass: false,
-      label: 'Playwright chromium not installed',
-      fix: playwrightInstallFix(),
+      label: `Playwright chromium is installed but failed to launch: ${cause.detail}`,
+      fix: 'Reinstalling will not fix this, because the browser is already installed. If doctor runs inside a sandbox or container, check that it allows a browser process to start.',
     };
   } finally {
     try { await browser?.close(); } catch { /* ignore */ }
@@ -732,6 +817,7 @@ const USER_LAYER_PREREQS = [
   },
   {
     path: 'config/profile.yml',
+    emptyImpact: 'evaluations and scans have none of your targeting',
     fix: [
       'Run: cp config/profile.example.yml config/profile.yml',
       'Then edit it with your details',
@@ -747,6 +833,7 @@ const USER_LAYER_PREREQS = [
   {
     path: 'portals.yml',
     env: 'CAREER_OPS_PORTALS',
+    emptyImpact: 'scans have no companies or filters',
     fix: [
       'Run: cp templates/portals.example.yml portals.yml',
       'Then customize with your target companies',
@@ -770,6 +857,19 @@ function prereqPresent(root, prereq) {
   return existsSync(prereqFile(root, prereq));
 }
 
+const EMPTY_YAML_REASON = 'has no settings (empty or only comments)';
+
+function emptyYamlPrereqs(root) {
+  return USER_LAYER_PREREQS.filter((prereq) => {
+    if (!prereq.emptyImpact || !prereqPresent(root, prereq)) return false;
+    try {
+      return !hasYamlContent(readFileSync(prereqFile(root, prereq), 'utf-8'));
+    } catch {
+      return false;
+    }
+  });
+}
+
 // The root's .env names a profile. scan.mjs, the evaluators, openai-tailor.mjs and
 // openrouter-runner.mjs load a .env, and all four follow CAREER_OPS_PROFILE once
 // it is loaded (scan.mjs from the data root, the evaluators and openai-tailor.mjs
@@ -788,6 +888,9 @@ function checkEnvFileProfile(root) {
 
 function checkPrereq(prereq) {
   const { path, fix } = prereq;
+  if (emptyYamlPrereqs(projectRoot).includes(prereq)) {
+    return { warn: true, label: `${path} ${EMPTY_YAML_REASON}; ${prereq.emptyImpact}`, fix };
+  }
   if (prereqPresent(projectRoot, prereq)) {
     return { pass: true, label: `${path} found` };
   }
@@ -868,12 +971,17 @@ async function checkPortalSlugs(root) {
   try {
     const { verifyPortalsFile } = await import('./verify-portals.mjs');
     const { loadProviders } = await import('./providers/_registry.mjs');
+    const { mergeProviderPlugins } = await import('./plugins/_engine.mjs');
     const { makeHttpCtx } = await import('./providers/_http.mjs');
     // Load the same provider plugins the scanner uses so tier 2 runs: without
     // them every non-ATS entry (all job_boards, plus any Workday/Avature/…
     // tracked_companies) resolves to an un-actionable "skipped" and a broken
     // one would never reach "missing" — a false pass.
     const providers = await loadProviders(join(__dirname, 'providers'));
+    // verify-portals.mjs's own CLI folds in enabled provider plugins (#4026);
+    // this caller builds the map itself, so it must too, or a plugin-provider
+    // entry is probed as unclaimed. No-op when config/plugins.yml is absent.
+    await mergeProviderPlugins(providers, { root: __dirname, dataRoot: root });
     const { results } = await verifyPortalsFile(portalsPath, {
       providers,
       httpCtx: makeHttpCtx(),
@@ -947,7 +1055,7 @@ function readPluginConfigSync(root) {
   const cfgPath = join(root, 'config', 'plugins.yml');
   if (!existsSync(cfgPath)) return { cfg: {}, error: null };
   try {
-    return { cfg: yaml.load(readFileSync(cfgPath, 'utf8')) || {}, error: null };
+    return { cfg: loadYaml(readFileSync(cfgPath, 'utf8')) || {}, error: null };
   } catch (err) {
     return { cfg: {}, error: String(err.message).split('\n')[0] };
   }
@@ -1019,7 +1127,7 @@ function checkCvShape(root) {
       ? 'cv.md: no Experience section the CV checks recognize — title and structure checks will not run'
       : 'cv.md: Experience section has no "### Company — Location" entries — title and structure checks will not run',
     fix: [
-      `Name the section ${EXPERIENCE_HEADING_NAMES.map((n) => `"## ${n}"`).join(', ')}`,
+      ...(sections.length === 0 ? [`Name the section ${EXPERIENCE_HEADING_NAMES.map((n) => `"## ${n}"`).join(', ')}`] : []),
       'Start each job with "### Company — Location", then a bold **Title** line, then a dates line (see examples/cv-example.md)',
     ],
   };
@@ -1269,7 +1377,7 @@ function titleFilterConflicts(root) {
   if (!existsSync(portalsPath)) return null;
   let config;
   try {
-    config = yaml.load(readFileSync(portalsPath, 'utf-8'));
+    config = loadYaml(readFileSync(portalsPath, 'utf-8'));
   } catch {
     // A portals.yml that does not parse is a different check's problem; this
     // one only has something to say about a file it could actually read.
@@ -1330,7 +1438,10 @@ function onboardingState(root) {
   // MCP project configuration belongs to the launch checkout. `root` is the
   // user-data layer and may point elsewhere under split-checkout installs.
   const mcpCheck = checkPlaywrightMcp(process.cwd(), activeCli);
-  const unpersonalized = unpersonalizedFiles(root);
+  const unpersonalized = [
+    ...unpersonalizedFiles(root),
+    ...emptyYamlPrereqs(root).map(({ path, emptyImpact }) => ({ path, reason: EMPTY_YAML_REASON, impact: emptyImpact })),
+  ];
   const titleFilterIssues = titleFilterConflicts(root);
   // Every other check in this function is data-layer and correctly uses this
   // function's own `root` parameter. The tracked-.bak check is the one

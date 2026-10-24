@@ -37,7 +37,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 
 import { resolveColumns, parseTrackerRow, linkedReportNumbers } from './tracker-parse.mjs';
 import { findCaptureForReport, captureSlug } from './jd-capture.mjs';
@@ -181,7 +181,7 @@ export function extractClosingDates(text, today, { strictMarkers = true } = {}) 
 
 /** Canonical states from templates/states.yml, as lookups to the label. */
 export function loadStateLookup(statesFile = STATES_FILE) {
-  const doc = yaml.load(readFileSync(statesFile, 'utf-8')) || {};
+  const doc = loadYaml(readFileSync(statesFile, 'utf-8')) || {};
   const lookup = new Map();
   for (const s of doc.states || []) {
     const label = String(s.label);

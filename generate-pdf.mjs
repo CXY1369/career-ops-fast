@@ -47,7 +47,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFile
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
 import { getCareerOpsRoot, getProfilePath, hasProfileOverride } from './path-resolver.mjs';
-import { readStyleTokens, injectThemeStyle, readCvSectionOrder } from './theme-style.mjs';
+import { readStyleTokens, injectThemeStyle, readCvSectionOrder, readLockedSections } from './theme-style.mjs';
 import { validateCvExperienceOrder } from './cv-experience-order.mjs';
 import { resolvePdfIndexPath, resolveTrackerPath, resolveWorkspaceRootFor, writeFileAtomic } from './tracker-utils.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
@@ -297,6 +297,16 @@ function normalizeTextForATS(html) {
       bump('markdown-bold', 1);
       return `<strong>${inner}</strong>`;
     });
+    // Markdown italic, as cv.md writes titles (_Game Title_). Both underscores
+    // must sit on a word boundary, and a path separator is not one, so
+    // snake_case, a_b and docs/_draft_/cv.md stay literal. Text-only elements
+    // (<title>, <textarea>, ...) would show <em> as literal text, so skip them.
+    if (!plainUntil) {
+      t = t.replace(/(?<![\p{L}\p{N}_/\\])_(?=[^_\s])([^_\n]*?[^_\s])_(?![\p{L}\p{N}_/\\])/gu, (_, inner) => {
+        bump('markdown-italic', 1);
+        return `<em>${inner}</em>`;
+      });
+    }
     return t;
   }
 
@@ -631,6 +641,79 @@ export function validateCvSectionOrder(html, cvMarkdown, { allowReorder = false 
     return;
   }
   throw new Error(message);
+}
+
+function normalizeForComparison(text) {
+  if (!text) return '';
+  return text
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&#?[a-z0-9]+;/gi, ' ')
+    .replace(/[#*`_~|•·]/g, ' ') // Strip markdown and bullet chars
+    .replace(/[^\p{L}\p{M}\p{N}\s]/gu, ' ') // Strip punctuation to be safe against ATS transformations
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Validate that sections marked as locked in config/profile.yml are identical
+ * (ignoring formatting) between the source cv.md and the rendered HTML.
+ * @param {string} html 
+ * @param {string} cvMarkdown 
+ * @param {string[]} lockedKeys 
+ */
+export function validateLockedSections(html, cvMarkdown, lockedKeys) {
+  if (!lockedKeys || lockedKeys.length === 0) return;
+
+  const htmlSections = html.matchAll(/<[^>]+class=["'][^"']*\bsection-title\b[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/gi);
+  const renderedMap = new Map();
+  let lastKey = null;
+  let lastIndex = 0;
+  for (const match of htmlSections) {
+    if (lastKey) {
+      renderedMap.set(lastKey, html.substring(lastIndex, match.index));
+    }
+    lastKey = sectionKey(match[1]);
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastKey) {
+    renderedMap.set(lastKey, html.substring(lastIndex));
+  }
+
+  // Each heading's section runs to the next heading of the same or a higher
+  // level, measured from that heading itself: a cv.md that opens with a
+  // `# Name` title must not swallow the `##` sections below it. When two
+  // headings fold to the same key, the shallower (then the first) one wins.
+  const sourceLines = cvMarkdown.split(/\r?\n/);
+  const headings = [];
+  sourceLines.forEach((line, index) => {
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) headings.push({ index, level: heading[1].length, key: sectionKey(heading[2]) });
+  });
+  const sourceMap = new Map();
+  const sourceLevels = new Map();
+  headings.forEach((heading, i) => {
+    if (sourceLevels.has(heading.key) && sourceLevels.get(heading.key) <= heading.level) return;
+    const next = headings.slice(i + 1).find(other => other.level <= heading.level);
+    const end = next ? next.index : sourceLines.length;
+    const body = sourceLines.slice(heading.index + 1, end);
+    sourceMap.set(heading.key, body.length ? body.join('\n') + '\n' : '');
+    sourceLevels.set(heading.key, heading.level);
+  });
+
+  for (const key of lockedKeys) {
+    if (!sourceMap.has(key)) {
+      const availableKeys = Array.from(sourceMap.keys()).map(k => `'${k}'`).join(', ');
+      throw new Error(`Configured locked_section '${key}' not found in cv.md. Available sections: ${availableKeys}`);
+    }
+    const sourceNorm = normalizeForComparison(sourceMap.get(key));
+    const renderedRaw = renderedMap.get(key) || '';
+    const renderedNorm = normalizeForComparison(renderedRaw);
+
+    if (sourceNorm !== renderedNorm) {
+      throw new Error(`Locked section '${key}' was modified during tailoring.\nExpected (normalized): ${sourceNorm}\nFound (normalized): ${renderedNorm}`);
+    }
+  }
 }
 
 /**
@@ -1707,6 +1790,7 @@ async function generatePDF() {
 
   validateCvSectionOrder(html, cvMarkdown, { allowReorder });
   validateCvExperienceOrder(html, { allowNonChronological });
+  validateLockedSections(html, cvMarkdown, readLockedSections(workspaceProfilePath(), sectionKey));
 
   // Normalize text for ATS compatibility (issue #1)
   const normalized = normalizeTextForATS(html);
@@ -1804,6 +1888,7 @@ async function runBatchFromManifest(manifestPath, globals) {
   const profilePath = workspaceProfilePath();
   const cvSectionOrder = readCvSectionOrder(profilePath);
   const styleTokens = readStyleTokens(profilePath);
+  const lockedKeys = readLockedSections(profilePath, sectionKey);
 
   for (let i = 0; i < manifest.length; i++) {
     const spec = manifest[i];
@@ -1867,6 +1952,7 @@ async function runBatchFromManifest(manifestPath, globals) {
       html = reorderCvSections(html, cvSectionOrder);
       validateCvSectionOrder(html, cvMarkdown, { allowReorder: globals.allowReorder });
       validateCvExperienceOrder(html, { allowNonChronological: globals.allowNonChronological });
+      validateLockedSections(html, cvMarkdown, lockedKeys);
       html = normalizeTextForATS(html).html;
       // Same gate, same guard and same place as the single render. A blocked
       // entry throws into the catch below: it is recorded as failed and never

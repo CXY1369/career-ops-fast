@@ -8,7 +8,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import * as yaml from 'js-yaml';
+import { loadYaml } from '../lib/yaml-document.mjs';
 import { isMainModule } from '../lib/is-main-module.mjs';
 import { getCareerOpsRoot, getProfilePath, hasProfileOverride } from '../path-resolver.mjs';
 import { validateFlags } from '../lib/cli-flags.mjs';
@@ -224,7 +224,7 @@ export function loadProfile(customProfilePath = null, customCvPath = null) {
     }
     try {
       const content = readFileSync(customProfilePath, 'utf8');
-      profileRaw = yaml.load(content);
+      profileRaw = loadYaml(content);
       if (!profileRaw || typeof profileRaw !== 'object') {
         throw new Error(`Invalid YAML in profile file: ${customProfilePath}`);
       }
@@ -238,7 +238,7 @@ export function loadProfile(customProfilePath = null, customCvPath = null) {
     }
     try {
       const content = readFileSync(profileSource, 'utf8');
-      profileRaw = yaml.load(content);
+      profileRaw = loadYaml(content);
       if (!profileRaw || typeof profileRaw !== 'object') {
         throw new Error('config/profile.yml is empty or invalid YAML: fill it in first');
       }

@@ -21,7 +21,7 @@
 import { chromium } from 'playwright';
 import { readFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { appendToPipeline, appendToScanHistory, PORTALS_PATH, SCAN_HISTORY_PATH } from './scan.mjs';
 import { createAdmissionGate } from './lib/admission-gate.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
@@ -91,7 +91,7 @@ if (hasFlag(args, '--keyword') && (!SINGLE_KEYWORD || SINGLE_KEYWORD.startsWith(
 
 let config = {};
 if (existsSync(PORTALS_PATH)) {
-  config = yaml.load(readFileSync(PORTALS_PATH, 'utf-8')) || {};
+  config = loadYaml(readFileSync(PORTALS_PATH, 'utf-8')) || {};
 }
 
 const interamtSearches = config.interamt_searches || DEFAULT_KEYWORDS.map(k => ({ was: k }));

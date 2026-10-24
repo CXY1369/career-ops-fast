@@ -231,17 +231,8 @@ npx playwright install chromium   # only needed for PDF generation
 # your distro's package manager if PDF generation fails to launch the browser
 # (Playwright's own docs list the required libraries per platform).
 
-# 2. Check setup
-npm run doctor                     # Validates all prerequisites
-
-# 3. Configure
-cp config/profile.example.yml config/profile.yml  # Edit with your details
-cp templates/portals.example.yml portals.yml       # Customize companies
-
-# 4. Add your CV
-# Create cv.md in the project root with your CV in markdown
-
-# 5. Open your AI CLI in this directory
+# 2. Open your AI CLI in this directory. On first launch it walks you
+#    through setup (your CV, profile and target roles) by chatting
 claude   # or codex / opencode / qwen / agy / grok
 
 # Then ask your CLI to adapt the system to you:
@@ -250,7 +241,7 @@ claude   # or codex / opencode / qwen / agy / grok
 # "Add these 5 companies to portals.yml"
 # "Update my profile with this CV I'm pasting"
 
-# 6. Start using
+# 3. Start using
 # Paste a job URL or JD text to trigger auto-pipeline
 # If your CLI supports slash commands, use /career-ops (or its CLI-specific alias)
 # In Codex, ask for the same mode in plain language, e.g.:
@@ -268,11 +259,11 @@ claude   # or codex / opencode / qwen / agy / grok
 npm i -g @santifer/career-ops
 ```
 
-これで `career-ops` バイナリがグローバルにインストールされ、`npx` を経由せず直接実行できます。プロジェクトディレクトリを用意する `npx @santifer/career-ops init` と違い、グローバルインストールではターミナルのどこからでも使える永続的な `career-ops` コマンドが手に入ります。
+これで `career-ops` バイナリがグローバルにインストールされ、`npx` なしで `career-ops init [folder]` を実行できます。`init` が唯一のコマンドです。ワークスペースを用意するだけで、その後の作業はすべてこのバイナリではなく AI コーディング CLI の中で行います（下の「使い方」を参照）。
 
 **どちらを使うべき？**
 - `npx @santifer/career-ops init`：初回利用に最適。専用のプロジェクトフォルダを作ります。
-- `npm i -g @santifer/career-ops`：プロジェクトフォルダがすでにあり、career-ops のコマンドを直接実行したいときに最適。
+- `npm i -g @santifer/career-ops`：`npx` 形式より `career-ops init` と打ちたい場合に。ほかのコマンドは増えません。
 
 > **このシステムは、あなたの AI コーディング CLI 自身がカスタマイズするように設計されています。** モード、アーキタイプ、スコアの重み、交渉スクリプト：変えてほしいと頼むだけです。CLI は自分が使っているファイルをそのまま読むので、何を編集すべきか正確に分かっています。
 
@@ -506,7 +497,7 @@ npm run serve:dashboard   # launch the TUI
 npm run build:dashboard   # optional: build the standalone binary
 ```
 
-機能：6 つのフィルタータブ、4 種類のソートモード、グループ表示／フラット表示、遅延読み込みのプレビュー、インラインでのステータス変更。
+機能：10 個のフィルタータブ、8 種類のソートモード、グループ表示／フラット表示、遅延読み込みのプレビュー、インラインでのステータス変更。
 
 **実験的な Web UI** もあります（アルファ版かつオプトイン：自分で起動しない限り何も動きません）：[`web/README.md`](web/README.md) を参照してください。
 
@@ -626,7 +617,7 @@ Go のダッシュボード TUI、Node.js スクリプト、AI エージェン�
 career-ops（[career-ops.org](https://career-ops.org)、別名 **careerops**） は、あなたの AI コーディング CLI（Claude Code、Codex、OpenCode など）の中でローカルで動くオープンソースの AI 求職ツールで、すべての判断をあなたに委ねます。求人を CV と照らして評価し、ATS 向けに調整した PDF を生成し、連絡すべき相手を見つけ、すべてを一か所で追跡します：最終判断は常にあなたのものです。[CareerOps マニフェスト](https://career-ops.org/manifesto)の最初のリファレンス実装です。
 
 **カスタマイズされた履歴書が事実をでっち上げることはありますか？**
-あってはならず、プロンプトにもそう書いてあります：言い換えはしても、でっち上げはしない。`generate-pdf` は、あなたの情報源にない数字や事実を含む CV をブロックします（`--skip-fact-check` を渡した場合を除く）。職名のチェックや言い換えの判断はまだしません。2 つのオープンな issue がそれを追跡しています：[#2677](https://github.com/career-ops-hq/career-ops/issues/2677)（職名は cv.md と一致させる）と [#1411](https://github.com/career-ops-hq/career-ops/issues/1411)（不一致なら止める忠実性チェック）。マージされるまでは、送る前にすべての履歴書を読んでください。[免責事項](LEGAL_DISCLAIMER.md) にも同じことがより長く書いてあります。
+あってはならず、プロンプトにもそう書いてあります：言い換えはしても、でっち上げはしない。`generate-pdf` は、あなたの情報源にない数字や事実を含む CV をブロックします（`--skip-fact-check` を渡した場合を除く）。`pdf` モードは `cv-title-check.mjs` も実行します。これはカスタマイズした CV の各職名を、cv.md に書かれた同じ職歴（会社と期間で照合）の職名と比べ、違いがあれば残すか元に戻すかをあなたに確認します。職名の言い回しを変えるのはあなたの判断であることもあるため、警告するだけでブロックはしません。言い換えの判断はまだ何もしません：[#1411](https://github.com/career-ops-hq/career-ops/issues/1411)（不一致なら止める忠実性チェック）がそれを追跡しています。それまでは、送る前にすべての履歴書を読んでください。[免責事項](LEGAL_DISCLAIMER.md) にも同じことがより長く書いてあります。
 
 **career-ops を無料で、あるいはより安価なモデルやローカルモデルで動かせますか？**
 はい。career-ops は CLI に依存せず、無料モデルやローカルモデル（OpenRouter の無料モデル、Ollama、または OpenAI 互換のエンドポイント）で動くので、有料サブスクリプションに縛られません。完全なセットアップは [docs/RUNNING_ON_A_BUDGET.md](docs/RUNNING_ON_A_BUDGET.md) を参照してください。

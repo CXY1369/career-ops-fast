@@ -83,6 +83,15 @@ const HARD_EXPIRED_PATTERNS = [
   /ce poste n'est plus (disponible|a pourvoir|ouvert)/i,
   /recrutement (termine|cloture)/i,
   /candidatures (closes|cloturees)/i,
+  // Polish (pracuj.pl and boards on the same layout keep an archived offer
+  // online, "Aplikuj" button included, and say it is closed only in a banner).
+  // Spelled in the normalized alphabet: normalizeForMatch() folds ą/ń/ż but
+  // not ł, which NFD does not decompose, hence the [łl] classes.
+  /og[łl]oszenie wygas[łl]o/i,
+  /pracodawca zakonczy[łl] zbieranie zg[łl]oszen/i,
+  /oferta (jest )?nieaktualna/i,
+  /oferta archiwalna/i,
+  /kandydaci nie sa juz akceptowani/i,
 ];
 
 const LISTING_PAGE_PATTERNS = [
@@ -160,6 +169,9 @@ const APPLY_PATTERNS = [
   // most getManfred postings, closed ones too, have an FAQ button such as
   // "¿Puedo aplicar si vivo fuera de España?".
   /\bapuntame\b/i,
+  // Spanish (HiringRoom): "Postularse". The label, not the verb: every HiringRoom
+  // posting also links a help article, "¿Cómo me postulo?" ("how do I apply?").
+  /\bpostularse\b/i,
   // Chinese MokaHR and Feishu Jobs detail pages use these exact control texts.
   // Keep them narrow: bare “申请” appears in descriptive prose, while longer
   // labels containing “投递” can be status/history controls rather than Apply.

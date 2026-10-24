@@ -153,21 +153,23 @@ test('generate-pdf does not treat the data root as outside its workspace', () =>
 const CLOSURE = {
   'set-status.mjs': [
     'set-status.mjs', 'path-resolver.mjs', 'tracker-utils.mjs', 'pipeline-lock.mjs', 'lib/dir-lock.mjs',
-    'tracker-parse.mjs', 'lib/local-today.mjs', 'role-matcher.mjs', 'templates/states.yml',
-    // session-activity.mjs (#4532): advisory in-progress claim taken before
-    // the write below.
-    'session-activity.mjs',
+    'lib/yaml-document.mjs', 'tracker-parse.mjs', 'lib/local-today.mjs', 'role-matcher.mjs', 'templates/states.yml',
+    // lib/status-hooks.mjs (#5536): the hooks around a status change, and
+    // session-activity.mjs (#4532), the advisory in-progress claim it takes
+    // before the write.
+    'lib/status-hooks.mjs', 'session-activity.mjs',
     // check-jd-archive.mjs / jd-capture.mjs: the transition into Interview
     // triggers a JD-archive check via these two (#4523), which in turn need
-    // their own two lib/ helpers.
+    // their own lib/ helpers.
     'check-jd-archive.mjs', 'jd-capture.mjs', 'lib/cli-flags.mjs', 'lib/is-main-module.mjs',
+    'lib/jd-archive-section.mjs',
     // Runtime assets, not imports: an import scan does not see these and each
     // one only announces itself by crashing the child.
     'tracker-aliases.json',
   ],
   'generate-pdf.mjs': [
     'generate-pdf.mjs', 'path-resolver.mjs', 'tracker-utils.mjs', 'pipeline-lock.mjs', 'lib/dir-lock.mjs',
-    'tracker-parse.mjs', 'theme-style.mjs', 'lib/page-format.mjs', 'lib/is-main-module.mjs',
+    'tracker-parse.mjs', 'theme-style.mjs', 'lib/page-format.mjs', 'lib/is-main-module.mjs', 'lib/yaml-document.mjs',
     'cv-sections-core.mjs', 'cv-experience-order.mjs',
     'tracker-aliases.json',
   ],

@@ -81,6 +81,8 @@ function isSafeValue(v) {
 //                  error status carrying a recognisable body lists that status
 //                  here instead (see the `workday` entry); a 200 it leaves out
 //                  takes the default per-job reading, proof the posting is live.
+//                  A 404 or 410 listed here is read the same way, in place of
+//                  the 404 rule below (see the `nofluffjobs` entry).
 //   `api404Authoritative` — defaults to true (a 404/410 means gone). Set to
 //                  false when the provider's public API can 404 a posting that
 //                  is still genuinely live elsewhere (see the `lever` entry).
@@ -395,12 +397,14 @@ const ATS_PROVIDERS = [
     api: ({ slug }) => `https://nofluffjobs.com/api/posting/${slug}`,
     // Measured 2026-10-18: a live posting answers 200 with status "PUBLISHED", a
     // closed one 200 with status "EXPIRED" (and expiredBeforeDays), and a slug the
-    // board does not have 404 {"status":"DOES_NOT_EXIST"}, so the 404 is
-    // authoritative here and any other readable status stays uncertain.
+    // board does not have 404 {"status":"DOES_NOT_EXIST"}. The 404 body is read
+    // too, so only that answer closes a posting, which scan --verify records for
+    // good: a 404 saying anything else falls back to the browser.
+    interpretStatuses: [200, 404],
     async interpret(res) {
       let posting;
       try { posting = await res.json(); } catch { return null; }
-      return classifyNoFluffJobsPosting(posting);
+      return classifyNoFluffJobsPosting(posting, res.status);
     },
   },
   {
@@ -618,17 +622,24 @@ export function classifyWorkablePosting(posting) {
  * Decide liveness for one No Fluff Jobs posting from its /api/posting/{slug} answer.
  * Pure + deterministic (no I/O), mirroring classifyWorkablePosting.
  *
- * "PUBLISHED" is live and "EXPIRED" is the board's own word for closed. Any other
- * readable status is one this rung has not seen, so it stays uncertain rather than
- * falling to the browser, which reads closed postings on this board as active. An
- * unreadable body returns null so a future API change degrades to the browser
- * rung rather than to a verdict.
+ * "PUBLISHED" is live and "EXPIRED" is the board's own word for closed; on a 404,
+ * only "DOES_NOT_EXIST" says the posting is gone. Any other status on a 200 is one
+ * this rung has not seen, so it stays uncertain rather than falling to the
+ * browser, which reads most closed postings on this board as active. A body with
+ * no status, and a 404 saying anything else, return null so a future API change
+ * degrades to the browser rung rather than to a verdict.
  *
  * @param {any} posting - the parsed per-posting API response
+ * @param {number} [httpStatus=200] - the response's HTTP status (200 or 404)
  * @returns {{ result: 'active' | 'expired' | 'uncertain', code: string, reason: string } | null}
  */
-export function classifyNoFluffJobsPosting(posting) {
-  if (!posting || typeof posting !== 'object') return null;
+export function classifyNoFluffJobsPosting(posting, httpStatus = 200) {
+  if (!posting || typeof posting !== 'object' || typeof posting.status !== 'string' || !posting.status) return null;
+  if (httpStatus === 404) {
+    return posting.status === 'DOES_NOT_EXIST'
+      ? { result: 'expired', code: 'nofluffjobs_api_gone', reason: 'No Fluff Jobs has no posting under this slug (404 DOES_NOT_EXIST)' }
+      : null;
+  }
   if (posting.status === 'PUBLISHED') {
     return { result: 'active', code: 'nofluffjobs_api_published', reason: 'No Fluff Jobs reports the posting published (live)' };
   }
@@ -928,7 +939,7 @@ export async function checkLivenessViaApi(url, { boardCache } = {}) {
       return null; // network / timeout / redirect → inconclusive, let Playwright decide
     }
 
-    if (res.status === 404 || res.status === 410) {
+    if ((res.status === 404 || res.status === 410) && !interpretStatuses?.includes(res.status)) {
       if (!api404Authoritative) return null; // inconclusive → let Playwright check the real page
       return { result: 'expired', code: `${ats}_api_gone`, reason: `ATS API ${res.status} — posting removed` };
     }

@@ -764,7 +764,7 @@ Mặc định lệnh quét `cv.md` gốc -- đọc kết quả như **danh sách
 - Công ty -- nhà tuyển dụng CUỐI. Nếu JD qua agency ("our client", domain agency, không nêu nhà tuyển dụng), HỎI người dùng tin đến từ agency nào, dùng `?` cho Company, và đặt mô tả phân biệt vào Notes (ví dụ `fintech, Hà Nội`). Không bao giờ ghi "Confidential" -- dấu `?` không phụ thuộc ngôn ngữ và không thể trùng với một công ty thật.
 - Via (khi tracker có cột) -- agency/recruiter, `—` cho tin trực tiếp. Trong TSV thêm tracker, nối nó như field có thẻ: `via={Agency}` (xem đặc tả định dạng TSV).
 - Vai trò
-- Score: sao chép điểm toàn cục 1-5 đã quyết định từ header báo cáo và `score` trong Machine Summary. Áp dụng mọi Scoring Rules trong `modes/_custom.md` khi quyết định điểm đó, không áp dụng lại khi ghi tracker. A-H là các phần của báo cáo, không phải điểm để lấy trung bình.
+- Score: sao chép điểm toàn cục 1-5 đã quyết định từ header báo cáo và `score` trong Machine Summary. Áp dụng mọi quy tắc chấm điểm của người dùng trong `modes/_profile.md` và `modes/_custom.md` khi quyết định điểm đó, không áp dụng lại khi ghi tracker. A-H là các phần của báo cáo, không phải điểm để lấy trung bình.
 - Status: `Evaluated`
 - PDF: ❌ (hoặc ✅ nếu auto-pipeline đã tạo PDF)
 - Report: liên kết tương đối từ gốc `[001](reports/001-company-2026-01-01.md)` (khi gộp bằng `merge-tracker.mjs` sẽ được chuẩn hóa tương đối với thư mục của tracker, ví dụ `../reports/...`; xem #760)

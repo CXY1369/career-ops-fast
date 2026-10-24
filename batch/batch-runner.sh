@@ -10,6 +10,7 @@ set -euo pipefail
 #   opencode  — opencode run (falls back to ollama launch opencode if not in PATH)
 #   gemini    — gemini -p
 #   qwen      — qwen -p
+#   grok      — grok -p with --always-approve
 #
 # Only claude supports --strict-mcp-config, the rate-limit/session retry loop,
 # and --parallel > 1; other CLIs run sequentially with a single attempt.
@@ -58,7 +59,41 @@ BATCH_DIR="$SCRIPT_DIR"
 INPUT_FILE="$BATCH_DIR/batch-input.tsv"
 STATE_FILE="$BATCH_DIR/batch-state.tsv"
 PROMPT_FILE="$BATCH_DIR/batch-prompt.md"
+# The profile follows CAREER_OPS_PROFILE as well as the data root, like every
+# other reader does through path-resolver.mjs (#5144). Building it from the
+# data root here left a run reading the data root's profile for spend_tier and
+# for the prompt's personalization while the .mjs readers used the override.
+# The .md prompt files still name config/profile.yml; the script-generated
+# runtime block and the injected personalization use $PROFILE_FILE.
 PROFILE_FILE="$DATA_ROOT/config/profile.yml"
+PROFILE_RESOLVED=false
+if [[ -f "$PROJECT_DIR/path-resolver.mjs" ]]; then
+  if ! resolved_profile_file="$(node --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const resolver = process.argv[1];
+    const { getProfilePath } = await import(pathToFileURL(resolver).href);
+    if (typeof getProfilePath !== "function") {
+      process.stderr.write("WARN: path-resolver.mjs has no getProfilePath(), so CAREER_OPS_PROFILE is ignored in this run. Update the install to use the override.\n");
+    } else {
+      const profile = getProfilePath();
+      process.stdout.write(process.platform === "win32" ? profile.replace(/\\/g, "/") : profile);
+    }
+  ' "$PROJECT_DIR/path-resolver.mjs")"; then
+    echo "ERROR: could not resolve the career-ops profile path through path-resolver.mjs" >&2
+    exit 1
+  fi
+  if [[ -n "$resolved_profile_file" ]]; then
+    PROFILE_FILE="$resolved_profile_file"
+    PROFILE_RESOLVED=true
+  fi
+elif [[ -n "${CAREER_OPS_PROFILE:-}" ]]; then
+  echo "WARN: no path-resolver.mjs next to this script, so CAREER_OPS_PROFILE is ignored in this run." >&2
+fi
+if [[ -n "${CAREER_OPS_PROFILE:-}" && "$PROFILE_RESOLVED" == "true" && ! -f "$PROFILE_FILE" ]]; then
+  # Before the override was honored this read the data root's profile anyway.
+  # Say it, instead of silently running with no profile at all.
+  echo "WARN: no profile at $PROFILE_FILE (CAREER_OPS_PROFILE); the prompt gets no profile and spend_tier is not taken from it." >&2
+fi
 LOGS_DIR="$BATCH_DIR/logs"
 DISCARD_LOG="$LOGS_DIR/discard.log"
 TRACKER_DIR="$DATA_ROOT/batch/tracker-additions"
@@ -87,17 +122,20 @@ DRY_RUN=false
 RETRY_FAILED=false
 RESUME_PAUSED=false
 START_FROM=0
+SCOPE_COMPANY=""
 MAX_RETRIES=2
 MIN_SCORE=0
 SKIP_PDF=false
-MODEL=""  # explicit override; otherwise resolved from config/profile.yml spend_tier
+MODEL=""  # explicit override; otherwise resolved from the profile's spend_tier
 RESOLVED_MODEL=""
 RESOLVED_SPEND_TIER=""
 CLI=claude
 RATE_LIMIT_SLEEP=300
 WORKER_TIMEOUT=1800
+THIN_ACTION=webfetch   # webfetch | skip | browser-extract: what to do when the JD is still empty after the prefetch and the ATS API fallback
 BATCH_PAUSED=false
 STATUS_ONLY=false
+STATUS_FULL=true
 WATCH_MODE=false
 LIMIT=0  # internal sentinel only; explicit --limit must be positive
 
@@ -110,7 +148,8 @@ usage() {
   cat <<'USAGE'
 career-ops batch runner — process job offers in batch via headless agent workers
 Defaults to claude; other CLIs via --cli. For claude the model is resolved from
-spend_tier in config/profile.yml unless --model overrides it.
+spend_tier in config/profile.yml (or in the file CAREER_OPS_PROFILE names)
+unless --model overrides it.
 
 Usage: batch-runner.sh [OPTIONS]
 
@@ -118,7 +157,8 @@ Options:
   --cli NAME           Agent CLI to use: claude (default), opencode, gemini, qwen, grok
   --model NAME         Model for the CLI (e.g. qwen2.5:32b for opencode/ollama).
                        For claude, overrides the tier-resolved model (otherwise
-                       config/profile.yml spend_tier: economy/standard/premium;
+                       the spend_tier in config/profile.yml, or in the file
+                       CAREER_OPS_PROFILE names: economy/standard/premium;
                        default standard).
   --parallel N         Number of parallel workers (default: 3 for claude, 1 otherwise).
                        On a rate limit, the rest of the batch runs on 1 worker.
@@ -126,16 +166,29 @@ Options:
   --retry-failed       Only retry offers marked as "failed" in state
   --resume-paused      Resume offers paused by a Claude session/rate limit
   --start-from N       Start from offer ID N (skip earlier IDs)
+  --company A,B        Only process offers whose company matches (case- and
+                       punctuation-insensitive substring of the notes' company
+                       half or of the URL, leaving out a shared ATS domain;
+                       comma-separated). Applies before --limit
   --limit N            Max offers: positive integer; omit for no limit
   --max-retries N      Max retry attempts per offer (default: 2)
   --min-score N        Skip PDF/tracker for offers scoring below N (default: 0 = off)
   --skip-pdf           Skip PDF generation entirely (write ❌ in tracker PDF column)
   --worker-timeout N   Stop a worker after N seconds and record it as failed
                        (default: 1800; 0 = no limit)
+  --thin-action MODE   What to do when no usable JD text could be fetched (JS-rendered
+                       page, empty shell): 'webfetch' (default) spawns the worker and
+                       lets it try WebFetch; 'skip' records the offer as skipped with
+                       a needs-playwright marker and spawns no worker; 'browser-extract'
+                       renders the page with browser-extract.mjs (headless Chromium,
+                       zero model tokens, needs 'npx playwright install chromium') and
+                       hands the recovered text to the worker
   --rate-limit-sleep N Maximum adaptive retry delay in seconds; 0 pauses immediately
                        (default: 300; range: 0–2147483647; claude only)
   --status             Show batch progress and a per-job table, then exit
-  --watch              Live-refresh progress until the run completes
+  --summary            With --status, print the totals only (the table is one row per offer)
+  --full               With --status, print the per-job table (the default)
+  --watch              Live-refresh progress (always with the per-job table) until the run completes
   -h, --help           Show this help
 
 Files:
@@ -148,7 +201,8 @@ Files:
 With a data root outside the checkout (CAREER_OPS_ROOT, CAREER_OPS_DATA_DIR
 or a .career-ops-data marker), config/profile.yml, reports/ and
 batch/tracker-additions/ are read and written there. The other files stay
-beside this script.
+beside this script. CAREER_OPS_PROFILE, when set, names the profile read for
+spend_tier and injected into the prompt, as it does for the other scripts.
 
 Examples:
   # Dry run to see pending offers
@@ -177,6 +231,9 @@ while [[ $# -gt 0 ]]; do
     --retry-failed) RETRY_FAILED=true; shift ;;
     --resume-paused) RESUME_PAUSED=true; shift ;;
     --start-from) START_FROM="$2"; shift 2 ;;
+    --company)
+      [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || { echo "ERROR: --company requires an argument"; exit 1; }
+      SCOPE_COMPANY="$2"; shift 2 ;;
     --limit)
       if [[ $# -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]] || [[ "$2" =~ ^0+$ ]]; then
         echo "ERROR: --limit must be a positive integer; omit --limit for no limit."
@@ -200,6 +257,14 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --model) MODEL="$2"; shift 2 ;;
+    --thin-action)
+      [[ $# -ge 2 ]] || { echo "ERROR: --thin-action requires an argument (skip, webfetch or browser-extract)"; exit 1; }
+      case "$2" in
+        skip|webfetch|browser-extract) THIN_ACTION="$2" ;;
+        *) echo "ERROR: --thin-action must be 'skip', 'webfetch' or 'browser-extract' (got '$2')."; exit 1 ;;
+      esac
+      shift 2
+      ;;
     --worker-timeout)
       if [[ $# -lt 2 ]] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
         echo "ERROR: --worker-timeout must be a non-negative integer (seconds)."
@@ -216,6 +281,8 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --status) STATUS_ONLY=true; shift ;;
+    --summary) STATUS_FULL=false; shift ;;
+    --full) STATUS_FULL=true; shift ;;
     --watch) WATCH_MODE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
@@ -282,6 +349,11 @@ check_prerequisites() {
     exit 1
   fi
 
+  if [[ "$THIN_ACTION" == "browser-extract" && ! -f "$PROJECT_DIR/browser-extract.mjs" ]]; then
+    echo "ERROR: --thin-action browser-extract needs browser-extract.mjs (and 'npx playwright install chromium')."
+    exit 1
+  fi
+
   # Resolve the binary the configured CLI actually needs. opencode can run
   # natively or fall back to ollama, so check for either.
   local cli_cmd
@@ -295,11 +367,13 @@ check_prerequisites() {
   esac
 
   if ! command -v "$cli_cmd" &>/dev/null; then
-    echo "ERROR: '$cli_cmd' not found in PATH (required for --cli $CLI)."
+    local level="ERROR"
+    [[ "$DRY_RUN" == "true" ]] && level="WARN"
+    echo "$level: '$cli_cmd' not found in PATH (required for --cli $CLI)."
     if [[ "$CLI" == "opencode" ]]; then
       echo "       Install opencode (https://opencode.ai) or Ollama (https://ollama.ai) with an opencode model."
     fi
-    exit 1
+    [[ "$DRY_RUN" == "true" ]] || exit 1
   fi
 
   # Parallelism, the rate-limit retry loop, and --strict-mcp-config are
@@ -474,8 +548,9 @@ get_retries() {
   echo "${retries:-0}"
 }
 
-# Read spend_tier from config/profile.yml. Defaults to "standard" if the key
-# is absent or invalid.
+# Read spend_tier from $PROFILE_FILE (config/profile.yml, or the file
+# CAREER_OPS_PROFILE names). Defaults to "standard" if the key is absent or
+# invalid.
 read_spend_tier() {
   local raw=""
 
@@ -1031,6 +1106,8 @@ process_offer() {
   # requirements, which together exceed 80 stripped words.
   local prefetch_min_words=80
   local jd_prefetch_words=0
+  local jd_raw_file=""
+  local curl_status=0
   if command -v curl >/dev/null 2>&1; then
     # Reject loopback, link-local, and private-network destinations before curl
     # connects. --proto/--proto-redir restrict schemes but not destination IPs,
@@ -1039,7 +1116,6 @@ process_offer() {
     local _url_safe
     local current_url="$url"
     local redirect_count=0
-    local curl_status=0
     local redirect_headers
     local redirect_location
     while :; do
@@ -1105,6 +1181,11 @@ process_offer() {
         break
       fi
     done
+      # Keep the bytes curl downloaded: the strip below discards <script> blocks,
+      # which is where a JS-rendered board keeps its JD (schema.org JobPosting,
+      # hydration payload), so jd-rescue.mjs reads this copy, not the stripped text.
+      jd_raw_file="${jd_file}.raw"
+      cp "$jd_file" "$jd_raw_file" 2>/dev/null || true
       # Strip HTML tags and count visible words to distinguish a real JD (hundreds
       # of words) from a JS shell (near zero visible text).
       jd_prefetch_words=$(node -e "
@@ -1126,6 +1207,22 @@ process_offer() {
       # miscompare. Strip everything that is not a digit and default to 0.
       jd_prefetch_words="${jd_prefetch_words//[^0-9]/}"
       jd_prefetch_words="${jd_prefetch_words:-0}"
+      # Zero-token JD rescue: read the JD out of the structured data the board
+      # already shipped in the bytes above. It only replaces the text when the page
+      # is thin or the rescued JD is longer, and it fails open (any failure leaves
+      # the stripped text as is, and the checks below decide as before).
+      if [[ -f "$BATCH_DIR/jd-rescue.mjs" && -s "$jd_raw_file" ]]; then
+        if _rs_line=$(node "$BATCH_DIR/jd-rescue.mjs" "$url" "$jd_raw_file" "$jd_file" "$jd_prefetch_words" 2>/dev/null); then
+          IFS=$'\t' read -r _rs_words _rs_method <<< "$_rs_line"
+          _rs_words="${_rs_words//[^0-9]/}"
+          _rs_words="${_rs_words:-0}"
+          if [[ "$_rs_words" -ge "$prefetch_min_words" ]]; then
+            echo "    ℹ️  JD rescue: recovered ${_rs_words} words via ${_rs_method} (visible text had ${jd_prefetch_words})"
+            jd_prefetch_words="$_rs_words"
+          fi
+        fi
+      fi
+      rm -f "$jd_raw_file"
       if [[ "$jd_prefetch_words" -lt "$prefetch_min_words" ]]; then
         : > "$jd_file"
         echo "    ℹ️  JD prefetch: thin content (${jd_prefetch_words} words) — worker will WebFetch"
@@ -1159,7 +1256,93 @@ process_offer() {
     rm -f "$jd_api_tmp"
   fi
 
+  # --thin-action: no usable JD text after the static fetch and the ATS API
+  # fallback (a JS-rendered page, an empty shell, a failed fetch). The default,
+  # 'webfetch', changes nothing: the worker is told to WebFetch. Detection only
+  # here; the skip is recorded after the "Processing offer" line below.
+  local jd_thin_skip=0 jd_thin_note="" jd_thin_retryable=0
+  if [[ ! -s "$jd_file" && "$THIN_ACTION" != "webfetch" ]]; then
+    if [[ "$THIN_ACTION" == "browser-extract" && -f "$PROJECT_DIR/browser-extract.mjs" ]]; then
+      # Real-browser read: zero model tokens, ~5-15s of Chromium. Success is
+      # compact JSON on stdout, a failure is exit 1 with a JSON error on stderr.
+      # A near-empty or taken-down page is a failure there, so the word floor
+      # below only has to stop a login wall or an error page full of navigation.
+      local be_out be_err be_words=0 be_code=""
+      be_out="$(mktemp "${TMPDIR:-/tmp}/batch-jd-browser.XXXXXX")"
+      be_err="$(mktemp "${TMPDIR:-/tmp}/batch-jd-browser-err.XXXXXX")"
+      if node "$PROJECT_DIR/browser-extract.mjs" "$url" --mode jd > "$be_out" 2> "$be_err"; then
+        node -e '
+          let d = "";
+          process.stdin.on("data", (c) => d += c);
+          process.stdin.on("end", () => {
+            try { const o = JSON.parse(d); process.stdout.write(typeof o.text === "string" ? o.text : ""); } catch { /* empty */ }
+          });
+        ' < "$be_out" > "$jd_file" 2>/dev/null || : > "$jd_file"
+        be_words=$(wc -w < "$jd_file" 2>/dev/null) || be_words=0
+        be_words="${be_words//[^0-9]/}"; be_words="${be_words:-0}"
+        if [[ "$be_words" -ge 200 ]]; then
+          echo "    🎭 Browser extract: recovered ${be_words} words"
+          jd_prefetch_words="$be_words"
+        else
+          : > "$jd_file"
+          echo "    🎭 Browser extract: no readable JD (${be_words} words)"
+        fi
+      else
+        : > "$jd_file"
+        be_code=$(node -e '
+          let d = "";
+          process.stdin.on("data", (c) => d += c);
+          process.stdin.on("end", () => { try { process.stdout.write(String(JSON.parse(d).code || "")); } catch { /* none */ } });
+        ' < "$be_err" 2>/dev/null) || be_code=""
+        echo "    🎭 Browser extract failed${be_code:+ ($be_code)}"
+        # Allowlist of transient failures worth another try. Everything else
+        # (unavailable, URL or validation errors, an unknown code) is a verdict
+        # about the page or the call and stays terminal.
+        case "$be_code" in
+          no_playwright)
+            jd_thin_retryable=1
+            jd_thin_note="browser-extract: Playwright is not installed — run 'npx playwright install chromium' and retry"
+            ;;
+          empty_text|navigation_error)
+            jd_thin_retryable=1
+            jd_thin_note="browser-extract failed ($be_code) — retryable"
+            ;;
+        esac
+      fi
+      rm -f "$be_out" "$be_err"
+    fi
+    if [[ ! -s "$jd_file" ]]; then
+      jd_thin_skip=1
+      # curl never got an HTTP response (DNS, refused, timeout, TLS): a transport
+      # problem, not a page that cannot be read. 'skipped' is terminal and
+      # --retry-failed would never pick it up again, so it stays retryable.
+      case "$curl_status" in
+        6|7|28|35|52|55|56)
+          jd_thin_retryable=1
+          [[ -n "$jd_thin_note" ]] || jd_thin_note="JD prefetch failed to connect (curl exit $curl_status) — retryable"
+          ;;
+      esac
+      [[ -n "$jd_thin_note" ]] || jd_thin_note="no usable JD text (--thin-action $THIN_ACTION) — needs-playwright"
+    fi
+  fi
+
   echo "--- Processing offer #$id${JOB_POS:+ ($JOB_POS)}: $url (report $report_num, attempt $((retries + 1)))"
+
+  if [[ "$jd_thin_skip" == "1" ]]; then
+    local thin_state="skipped" thin_now
+    local thin_retries="$retries"
+    if [[ "$jd_thin_retryable" == "1" ]]; then
+      thin_state="failed"
+      # Spend one retry so --retry-failed stops at MAX_RETRIES instead of looping.
+      (( thin_retries < MAX_RETRIES )) && thin_retries=$((retries + 1))
+    fi
+    thin_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    update_state_retrying "$id" "$url" "$thin_state" "$started_at" "$thin_now" "-" "-" "$jd_thin_note" "$thin_retries" || true
+    release_report_num "$report_num"
+    rm -f "$jd_file"
+    echo "    🚫 $jd_thin_note — no worker spawned"
+    return 0
+  fi
 
   # Build the prompt with placeholders replaced
   local prompt
@@ -1204,17 +1387,36 @@ process_offer() {
     {
       printf '\n\n---\n\n'
       printf '## Runtime paths: data root outside the checkout\n\n'
-      printf 'This install keeps the user layer in a separate data root. Wherever this prompt names one of the paths below, resolve it under the data root, not the working directory:\n\n'
+      printf 'This install keeps the user layer in a separate data root. The profile for this run is `%s`. Where this prompt names `config/profile.yml`, read that file instead. Wherever this prompt names one of the paths below, resolve it under the data root, not the working directory:\n\n' "$PROFILE_FILE"
       printf 'Data root: %s\n\n' "$DATA_ROOT"
-      printf '`cv.md`, `article-digest.md`, `config/profile.yml`, `modes/_profile.md`, `modes/_custom.md`, `reports/`, `output/`, `data/`, `interview-prep/`, `batch/tracker-additions/`\n\n'
+      printf '`cv.md`, `article-digest.md`, `modes/_profile.md`, `modes/_custom.md`, `reports/`, `output/`, `data/`, `interview-prep/`, `batch/tracker-additions/`\n\n'
       printf 'Write the report under `reports/` in the data root and the tracker TSV under `batch/tracker-additions/` in the data root, and give scripts absolute data-root paths for these files. Markdown links written inside the report and the tracker TSV keep the relative form this prompt shows (`reports/...`). Every other path (`templates/`, the `.mjs` scripts, the other `modes/` files) stays relative to the working directory.\n'
+    } >> "$resolved_prompt"
+  fi
+
+  # The .md prompts name config/profile.yml. When CAREER_OPS_PROFILE names a
+  # different file, the worker would read the wrong profile for everything
+  # except the personalization injected below, so name the file this run uses.
+  # With the data root outside the checkout the runtime block above already
+  # does that, so this only fills the default layout.
+  # The override is checked first, the way hasProfileOverride() does it, and
+  # the path comparison only after it. With no override the two paths are the
+  # same file, but not always the same string: through a junction or symlink
+  # getProfilePath() returns the real path while DATA_ROOT keeps the one pwd
+  # gave, and that alone used to add this block.
+  local profile_override="${CAREER_OPS_PROFILE:-}"
+  if [[ -n "${profile_override//[[:space:]]/}" && "$PROFILE_RESOLVED" == "true" && "$PROFILE_FILE" != "$DATA_ROOT/config/profile.yml" && "$DATA_ROOT" == "$PROJECT_DIR" ]]; then
+    {
+      printf '\n\n---\n\n'
+      printf '## Runtime profile\n\n'
+      printf 'The profile for this run is `%s`. Where this prompt names `config/profile.yml`, read that file instead.\n' "$PROFILE_FILE"
     } >> "$resolved_prompt"
   fi
 
   # Inject user-layer personalization into the temporary worker prompt.
   # The resolved prompt is gitignored runtime state, so user profile data stays
   # out of the system layer while batch scoring matches interactive scoring.
-  for context_file in "$DATA_ROOT/modes/_profile.md" "$DATA_ROOT/config/profile.yml" "$DATA_ROOT/modes/_custom.md"; do
+  for context_file in "$DATA_ROOT/modes/_profile.md" "$PROFILE_FILE" "$DATA_ROOT/modes/_custom.md"; do
     if [[ -f "$context_file" ]]; then
       {
         printf '\n\n---\n\n'
@@ -1665,6 +1867,8 @@ print_summary() {
 }
 
 print_status_table() {
+  # $1 = "full" forces the per-job table whatever STATUS_FULL says (--watch).
+  local force_full="${1:-}"
   if [[ ! -f "$STATE_FILE" ]]; then
     echo "No state file found at $STATE_FILE"
     return
@@ -1713,6 +1917,10 @@ print_status_table() {
     avg=$(LC_ALL=C awk -v sum="$score_sum" -v count="$score_count" 'BEGIN{printf "%.1f", sum / count}' 2>/dev/null || echo "N/A")
     echo "Average score: $avg/5 ($score_count scored)"
   fi
+
+  if [[ "$force_full" != "full" && "$STATUS_FULL" != "true" ]]; then
+    return
+  fi
   echo ""
 
   # Format the per-job table:
@@ -1756,7 +1964,7 @@ watch_status() {
     while kill -0 "$active_pid" 2>/dev/null; do
       clear || printf "\033[c"
       echo "=== Watching Batch Progress (PID $active_pid) ==="
-      print_status_table
+      print_status_table full
       sleep 2
     done
     echo ""
@@ -1766,7 +1974,7 @@ watch_status() {
   fi
 
   echo "Showing final status:"
-  print_status_table
+  print_status_table full
 
   # Chain verify-pipeline.mjs
   if [[ -f "$PROJECT_DIR/verify-pipeline.mjs" ]]; then
@@ -1837,6 +2045,18 @@ main() {
   local -a pending_sources=()
   local -a pending_notes=()
 
+  # --company: resolve the matching ids ONCE (batch/company-scope.mjs), then skip
+  # every other row before --limit is counted.
+  local scope_ids=""
+  if [[ -n "$SCOPE_COMPANY" ]]; then
+    if ! scope_ids=$(node "$BATCH_DIR/company-scope.mjs" --input "$INPUT_FILE" --company "$SCOPE_COMPANY"); then
+      echo "ERROR: could not resolve --company scope (company-scope.mjs failed)." >&2
+      exit 1
+    fi
+    scope_ids=" $(echo "$scope_ids" | tr '\n' ' ') "
+    echo "Scope: company=$SCOPE_COMPANY ($(echo "$scope_ids" | wc -w | tr -d ' ') matching row(s))"
+  fi
+
   while IFS=$'\t' read -r id url source notes; do
     [[ "$id" == "id" ]] && continue  # skip header
     [[ -z "$id" || -z "$url" ]] && continue
@@ -1846,6 +2066,10 @@ main() {
 
     # Skip if before start-from
     if (( id < START_FROM )); then
+      continue
+    fi
+
+    if [[ -n "$SCOPE_COMPANY" && "$scope_ids" != *" $id "* ]]; then
       continue
     fi
 
@@ -1956,13 +2180,18 @@ main() {
         break
       fi
 
-      if (( PARALLEL > 1 )) && [[ -f "${THROTTLE_FILE:-}" ]]; then
-        PARALLEL=1
-        echo "=== Rate limited: running the remaining offers on 1 worker. ==="
-      fi
-
-      # Wait if we're at parallel limit
-      while (( running >= PARALLEL )); do
+      # Wait if we're at parallel limit. The throttle check opens every pass,
+      # so it also runs after the sleep below: a rate limit recorded while this
+      # loop slept drops the run to one worker before the next offer starts,
+      # not after it.
+      while :; do
+        if (( PARALLEL > 1 )) && [[ -f "${THROTTLE_FILE:-}" ]]; then
+          PARALLEL=1
+          echo "=== Rate limited: running the remaining offers on 1 worker. ==="
+        fi
+        if (( running < PARALLEL )); then
+          break
+        fi
         # Wait for any child to finish
         for j in "${!pids[@]}"; do
           if ! kill -0 "${pids[$j]}" 2>/dev/null; then
@@ -1987,10 +2216,6 @@ main() {
         if [[ "$BATCH_PAUSED" == "true" || -f "$PAUSE_FILE" ]]; then
           echo "=== Batch paused: session/rate limit reached. Waiting for running workers, not scheduling new offers. ==="
           break
-        fi
-        if (( PARALLEL > 1 )) && [[ -f "${THROTTLE_FILE:-}" ]]; then
-          PARALLEL=1
-          echo "=== Rate limited: running the remaining offers on 1 worker. ==="
         fi
         sleep 1
       done

@@ -24,7 +24,7 @@ Read `spend_tier` from `config/profile.yml` (see `modes/_shared.md` -- Spend Tie
 - **`economy` tier:** No gate. The tier is already the cheapest available. Every surviving pending URL goes straight to the full evaluation.
 - This gate only applies to pipeline/batch processing. It never applies to a single interactive evaluation.
 
-**Discard log (auditable):** Every posting the gate filters out MUST be logged with a one-line reason so pre-filtering is never a silent black box. Append one line to `data/discard.log` (create the file if absent) in the format `{ISO8601 timestamp}\t{url}\t{reason}` (three tab-separated fields — interactive pipeline mode has no batch job ID, so the `id` field is omitted here; batch mode's `batch/batch-runner.sh` uses a separate `batch/logs/discard.log` with a four-field format that includes the job ID), in addition to the `skipped` entry already written to "Processed" above. This log is the visible, auditable record of what the gate discarded and why -- review it periodically to tune the North Star archetypes if the gate is too aggressive or too lax.
+**Discard log (auditable):** Every posting the gate filters out MUST be logged with a one-line reason so pre-filtering is never a silent black box. Append one line to `data/discard.log` (create the file if absent) in the format `{ISO8601 timestamp}\t{url}\t{reason}` (three tab-separated fields — interactive pipeline mode has no batch job ID, so the `id` field is omitted here; batch mode's `batch/batch-runner.sh` uses a separate `batch/logs/discard.log` with a four-field format that includes the job ID), in addition to the `skipped` entry already written to "Processed" above. This log is the visible, auditable record of what the gate discarded and why -- review it periodically to tune the North Star archetypes if the gate is too aggressive or too lax. `node discard-analytics.mjs` summarizes it: counts by reason, domain and day, plus the most frequent `title_mismatch` URLs to check by hand.
 
 ## Workflow
 
@@ -70,7 +70,7 @@ List `unreadable` items separately too, with URL and a reason code, when the JD 
 - [x] #144 | https://boards.greenhouse.io/xyz/jobs/012 | BigCo | SA | 2.1/5 | PDF ❌
 ```
 
-> Note: the section headers may be in EN ("Pending"/"Processed"), ES ("Pendientes"/"Procesadas"), or any other language a market mode set writes them in. Be flexible when reading, faithful to the existing file's style when writing. `scan.mjs` (`PENDING_MARKERS`/`PROCESSED_MARKERS`) and `reconcile-pipeline.mjs` (`PENDING_RE`/`PROCESSED_RE`) already accept the EN and ES spellings.
+> Note: the section headers may be in EN ("Pending"/"Processed"), ES ("Pendientes"/"Procesadas"), or any other language a market mode set writes them in. Be flexible when reading, faithful to the existing file's style when writing. `scan.mjs`, `sync-batch-input.mjs` and `reconcile-pipeline.mjs` read every heading a `modes/*/pipeline.md` writes, from one table in `lib/pipeline-sections.mjs`.
 
 Pending lines are variable-width. The rawest form is a bare pasted URL,
 `- [ ] {url}` (1 column) — what you drop into the inbox by hand. Scanner-written

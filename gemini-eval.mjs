@@ -59,7 +59,7 @@ import {
   formatReportNumber, releaseReportNumbers, reserveReportNumbers,
 } from './reserve-report-num.mjs';
 import { buildBudgetedPrompt } from './lib/context-budget.mjs';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 
 // ---------------------------------------------------------------------------
 // Bootstrap: load .env before anything else
@@ -78,6 +78,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 // ---------------------------------------------------------------------------
 import { getCareerOpsRoot, getProfilePath, resolveTrackerPath } from './path-resolver.mjs';
 import { localToday } from './lib/local-today.mjs';
+import { withJdArchiveSection } from './lib/jd-archive-section.mjs';
 import { TSV_ADDITION_HEADER } from './tracker-parse.mjs';
 
 const CODE_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -132,7 +133,7 @@ function resolveModesDirCandidate(customModesDir) {
 if (existsSync(PATHS.profileYml)) {
   try {
     const yamlContent = stripBom(readFileSync(PATHS.profileYml, 'utf-8'));
-    const profile = yaml.load(yamlContent);
+    const profile = loadYaml(yamlContent);
     const rawModesDir = profile && profile.language && profile.language.modes_dir;
     if (rawModesDir) {
       const candidates = Array.isArray(rawModesDir) ? rawModesDir : [rawModesDir];
@@ -571,7 +572,7 @@ if (saveReport) {
 
 ---
 
-${evaluationText.replace(/---SCORE_SUMMARY---[\s\S]*?---END_SUMMARY---/, '').trim()}
+${withJdArchiveSection(evaluationText.replace(/---SCORE_SUMMARY---[\s\S]*?---END_SUMMARY---/, '').trim(), jdText).trimEnd()}
 `;
 
       writeFileSync(reportPath, reportContent, 'utf-8');

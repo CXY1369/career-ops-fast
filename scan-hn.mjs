@@ -14,7 +14,7 @@ try {
 } catch (e) {}
 
 import { readFileSync, existsSync } from 'fs';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { appendToPipeline, appendToScanHistory, PORTALS_PATH } from './scan.mjs';
 import { buildTitleFilter } from './title-keywords.mjs';
@@ -47,7 +47,7 @@ Flags:
 function loadPortals() {
   if (!existsSync(PORTALS_PATH)) return {};
   try {
-    return yaml.load(readFileSync(PORTALS_PATH, 'utf-8')) || {};
+    return loadYaml(readFileSync(PORTALS_PATH, 'utf-8')) || {};
   } catch (err) {
     // Same message and exit as scan.mjs. Swallowing this ran the scan on the
     // default keyword, so a user who set hn_hiring.keywords got postings they
@@ -88,7 +88,7 @@ export async function extractWithAI(rawText, model) {
 
     let parsed;
     try {
-      parsed = yaml.load(clean);
+      parsed = loadYaml(clean);
     } catch {
       return null; // Always return null on parse errors
     }

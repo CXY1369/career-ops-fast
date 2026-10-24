@@ -42,20 +42,49 @@ function scratch() {
   return mkdtempSync(join(tmpdir(), 'apply-scope-'));
 }
 
-test('resolveInsideProject accepts a file inside the root and rejects escapes', async () => {
+// A file symlink on Windows needs SeCreateSymbolicLinkPrivilege, which a
+// non-elevated account without Developer Mode lacks, so symlink() answers
+// EPERM. CI runs elevated and takes the symlink every time. Only that EPERM,
+// from symlink() itself, is tolerated here; anything else still fails.
+function noSymlinkPrivilege(error) {
+  return process.platform === 'win32' && error?.code === 'EPERM' && error?.syscall === 'symlink';
+}
+
+// A link to a path that does not exist yet. Without the privilege a junction
+// stands in: it needs none, and apply-scope sees it the way it sees a dangling
+// symlink, an entry lstat finds and realpath cannot resolve.
+function danglingLink(target, path) {
+  try {
+    symlinkSync(target, path);
+  } catch (error) {
+    if (!noSymlinkPrivilege(error)) throw error;
+    symlinkSync(target, path, 'junction');
+  }
+}
+
+test('resolveInsideProject accepts a file inside the root and rejects escapes', async (t) => {
   const { resolveInsideProject, ApplyScopeError } = await import('../apply-scope.mjs');
   const root = scratch();
   const outside = scratch();
   try {
     writeFileSync(join(root, 'cv.md'), 'inside');
     writeFileSync(join(outside, 'secret.md'), 'other-install');
-    symlinkSync(join(outside, 'secret.md'), join(root, 'linked.md'));
+    let fileLink = true;
+    try {
+      symlinkSync(join(outside, 'secret.md'), join(root, 'linked.md'));
+    } catch (error) {
+      if (!noSymlinkPrivilege(error)) throw error;
+      fileLink = false;
+    }
 
     const inside = resolveInsideProject(root, 'cv.md');
     assert.equal(inside, resolve(root, 'cv.md'));
 
     assert.throws(() => resolveInsideProject(root, join(outside, 'secret.md')), ApplyScopeError);
-    assert.throws(() => resolveInsideProject(root, 'linked.md'), ApplyScopeError);
+    // A file link has no privilege-free stand-in on Windows (a hard link is
+    // not an escape), so this one check waits for a machine that can make it.
+    if (fileLink) assert.throws(() => resolveInsideProject(root, 'linked.md'), ApplyScopeError);
+    else t.diagnostic('not checked here: a file symlink out of the root (no symlink privilege, EPERM)');
     assert.throws(() => resolveInsideProject(root, join(root, '..', 'outside.md')), ApplyScopeError);
     assert.throws(() => resolveInsideProject(root, ''), ApplyScopeError);
 
@@ -64,7 +93,7 @@ test('resolveInsideProject accepts a file inside the root and rejects escapes', 
     assert.throws(() => resolveInsideProject(root, join(link, 'new.md')), ApplyScopeError);
 
     const dangling = join(root, 'dangling');
-    symlinkSync(join(outside, 'not-yet'), dangling);
+    danglingLink(join(outside, 'not-yet'), dangling);
     assert.throws(() => resolveInsideProject(root, dangling), ApplyScopeError);
     assert.throws(() => resolveInsideProject(root, join(dangling, 'new.md')), ApplyScopeError);
   } finally {
@@ -288,7 +317,7 @@ test('check-path and launch-options stay inside the project browser', () => {
     assert.match(escaped.stderr, /outside the project/);
 
     const dangling = join(data, 'dangling');
-    symlinkSync(join(outside, 'not-yet'), dangling);
+    danglingLink(join(outside, 'not-yet'), dangling);
     const danglingCheck = spawnSync(NODE, [join(ROOT, 'apply-scope.mjs'), 'check-path', dangling], {
       cwd: ROOT,
       env: { ...process.env, CAREER_OPS_ROOT: '', CAREER_OPS_DATA_DIR: data },

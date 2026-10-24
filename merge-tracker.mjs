@@ -31,7 +31,7 @@ import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { roleFuzzyMatch } from './role-matcher.mjs';
 import { parsePdfIndex, livePdfIndex, normNum } from './find.mjs';
-import { LEGACY_COLMAP, TSV_REQUIRED_FIELDS, detectColumns, isHeaderRow, resolveScoreStatus, looksLikeTsvHeaderRow, resolveTsvColumns, looksLikeScoreCell, parseScore, normalizeVia, normalizeTextKey, SEPARATOR_ROW_RE, extractReqNumber, extractCellUrl, parseMarkdownLinks, unwrapReportUrlToken } from './tracker-parse.mjs';
+import { LEGACY_COLMAP, TSV_REQUIRED_FIELDS, detectColumns, isHeaderRow, resolveScoreStatus, looksLikeTsvHeaderRow, resolveTsvColumns, looksLikeScoreCell, parseScore, normalizeVia, normalizeTextKey, SEPARATOR_ROW_RE, extractReqNumber, extractCellUrl, parseMarkdownLinks, firstLinkTarget, unwrapReportUrlToken } from './tracker-parse.mjs';
 // The ATS vendor table shared with analyze-patterns.mjs and the scanners, so
 // the URL cell's label and the per-vendor analysis name a board identically.
 import { atsVendorOf } from './ats-vendor.mjs';
@@ -487,12 +487,12 @@ export async function mergeTracker(options = {}) {
    * @returns {string|null}
    */
   function resolveReportTarget(reportField) {
-    const linkMatch = (reportField || '').match(/\]\(([^)]+)\)/);
-    if (!linkMatch) return null;
+    const linkTarget = firstLinkTarget(reportField);
+    if (linkTarget == null) return null;
     // Containment, not cosmetics: resolve and assert the path stays under
     // REPORTS_ROOT. Stripping leading `../` alone still let an embedded
     // `reports/../../..` walk out of the tree, and the tracker is user-editable.
-    const reportPath = resolve(REPORTS_ROOT, linkMatch[1].trim().replace(/^(\.\.\/)+/, ''));
+    const reportPath = resolve(REPORTS_ROOT, linkTarget.trim().replace(/^(\.\.\/)+/, ''));
     return reportPath.startsWith(REPORTS_ROOT + sep) ? reportPath : null;
   }
 

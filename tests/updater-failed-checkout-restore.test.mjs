@@ -155,8 +155,10 @@ console.log('\n🧪 Testing that a failed update restores what it had checked ou
     else fail('the self-reexec catch does not restore the files it checked out before rethrowing');
 
     // The child: the non-benign branch of the step-3 checkout loop.
-    // Both restores pass the preserved files, which the checkout excluded.
-    const child = /if \(!checkoutErrorIsBenign\(err, \{ absentUpstream, preservedState \}\)\) \{[\s\S]*?restoreAfterFailedUpdate\(updated, initialStatusPaths,[^\n]*exclude: preservedPaths \}\);\n\s*restoreAfterFailedUpdate\(\[path\], initialStatusPaths,[^\n]*exclude: preservedPaths \}\);\n\s*throw err;\s*\n\s*\}/;
+    // Both restores pass the preserved files, which the checkout excluded. The
+    // first list is everything already written: the loop's `updated`, plus any
+    // path a failed batched checkout had started before the loop took over.
+    const child = /if \(!checkoutErrorIsBenign\(err, \{ absentUpstream, preservedState \}\)\) \{[\s\S]*?const written = mergePathLists\(updated, batchAttempted\)\.filter\(\(p\) => p !== path\);\n\s*restoreAfterFailedUpdate\(written, initialStatusPaths,[^\n]*exclude: preservedPaths \}\);\n\s*restoreAfterFailedUpdate\(\[path\], initialStatusPaths,[^\n]*exclude: preservedPaths \}\);\n\s*throw err;\s*\n\s*\}/;
     if (child.test(body)) pass('a non-benign checkout error restores the paths already updated, preserved files excluded, then rethrows');
     else fail('the step-3 checkout loop rethrows without restoring what it had updated, or restores without excluding the preserved files');
 

@@ -398,7 +398,7 @@ Batch mode limitation: Playwright is not available, so exact apply-button state 
 
 Signals 1-5, 7-9 and 18 set the tier. Signal 6 is `not evaluated` in batch, so it never feeds the tier either — it stays a descriptive, informational finding, as the Risk Summary already reports. Signals 10-16 never change the tier: report each one separately as its own finding, keep every one of them descriptive rather than assertive, and close them as informational, not legal advice. Signals 19, 20, 21 and 22 likewise never change the tier: report each as its own informational finding. Signal 17 likewise never changes the tier: keep it informational, never treat its modeled purchasing-power comparison as a verdict on the offer, and close it as not financial or tax advice. Keep Signal 21 warn-only and informational, and close it as not legal advice.
 
-Use one tier: **High Confidence**, **Proceed with Caution**, or **Suspicious**. Present observations, not accusations, and explain thin evidence.
+Use one tier: **High Confidence**, **Proceed with Caution**, or **Suspicious**. Present observations, not accusations, and explain thin evidence. When the tier-setting signals give too little evidence to decide either way, use **Proceed with Caution** and say what was missing; never pick **Suspicious** without evidence.
 
 #### Verdict (lead)
 
@@ -450,26 +450,6 @@ Block format:
 | Relocation purchasing power | ℹ️ {home.jurisdiction} ~{home.takeHome} vs {dest.jurisdiction} ~{dest.takeHome} |
 ```
 
-#### Score Global
-Read `modes/_custom.md` → Scoring Rules, if it exists, and apply its override here. Default (if absent or silent): calculate global score based on dimension scores below.
-
-Use available signals:
-
-1. JD specificity and realism
-2. salary transparency
-3. boilerplate ratio
-4. company hiring/freeze/layoff signals from WebSearch
-5. prior appearances in `data/scan-history.tsv`
-6. suspicious or scam-like language
-
-Use one tier:
-
-- High Confidence
-- Proceed with Caution
-- Suspicious
-
-If evidence is thin, default to `Proceed with Caution` and explain the limitation.
-
 #### Global Score
 
 Provide a score table:
@@ -483,7 +463,7 @@ Provide a score table:
 | Red flags | -X if any |
 | **Global** | **X.X/5** |
 
-Decide the Global Score once as the holistic judgment across these dimensions, applying any `modes/_custom.md` Scoring Rules. Do not average report blocks A–H. Copy the same value into the report header, Machine Summary `score`, and tracker addition; do not recalculate it at each write.
+Decide the Global Score once as the holistic judgment across these dimensions, applying the user's scoring rules from `modes/_profile.md` and `modes/_custom.md`. Do not average report blocks A–H. Copy the same value into the report header, Machine Summary `score`, and tracker addition; do not recalculate it at each write.
 
 #### Score Evidence
 

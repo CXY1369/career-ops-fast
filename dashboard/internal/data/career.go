@@ -18,7 +18,6 @@ import (
 )
 
 var (
-	reReportLink     = regexp.MustCompile(`\[(\d+)\]\(([^)]+)\)`)
 	reScoreValue     = regexp.MustCompile(`(\d+\.?\d*)/5`)
 	reSeparatorRow   = regexp.MustCompile(`^\|\s*:?-+:?(?:\s*\|\s*:?-+:?)*\s*\|?\s*$`)
 	reArchetype      = regexp.MustCompile(`(?i)\*\*(?:Arquetipo|Archetype)(?:\s+(?:detectado|detected))?\*\*\s*\|\s*(.+)`)
@@ -29,6 +28,7 @@ var (
 	reArchetypeColon = regexp.MustCompile(`(?i)\*\*(?:Arquetipo|Archetype):\*\*\s*(.+)`)
 	reArchetypeYAML  = regexp.MustCompile(`(?m)^archetype:\s*"?([^"\n]+)"?\s*$`)
 	reReportURL      = regexp.MustCompile(`(?m)^\*\*URL:\*\*\s*(https?://\S+)`)
+	reReportLabel    = regexp.MustCompile(`^\d+$`)
 	// Backslash escapes a markdown link destination may carry; mirrors the
 	// unescape in tracker-parse.mjs markdownLinkDestination().
 	reMarkdownDestEscape = regexp.MustCompile(`\\([\\()<> ])`)
@@ -275,9 +275,9 @@ func ParseApplications(careerOpsPath string) ([]model.CareerApplication, error) 
 		// back to a careerOpsPath-relative path, which is what every
 		// consumer joins against. Legacy root-relative links are kept as a
 		// fallback when the resolved file does not exist.
-		if rm := reReportLink.FindStringSubmatch(at("report")); rm != nil {
-			app.ReportNumber = rm[1]
-			app.ReportPath = resolveReportPath(careerOpsPath, filePath, rm[2])
+		if link, ok := firstNumberedLink(at("report")); ok {
+			app.ReportNumber = link.label
+			app.ReportPath = resolveReportPath(careerOpsPath, filePath, link.target)
 		}
 
 		// Notes column, when present.
@@ -761,10 +761,15 @@ func LoadReportSummary(careerOpsPath, reportPath string) (archetype, tldr, remot
 // the same delimiter logic as ParseApplications: a mixed "| " + tab-separated
 // body, or a pure pipe-delimited row. Field 0 is the first real column (num), so
 // the returned indices match the legacy layout (Status is field 5).
+//
+// A line is tab-delimited only when it holds a tab and at most two pipes, as in
+// tracker-parse.mjs trackerRowSeparator. In a pipe table a tab is note text that
+// set-status.mjs --note keeps verbatim, not a column delimiter.
+// test-fixtures/tracker-row-split-parity.json pins both readers to one table.
 func splitTrackerRow(line string) []string {
 	line = strings.TrimSpace(line)
 	var fields []string
-	if strings.Contains(line, "\t") {
+	if strings.Contains(line, "\t") && strings.Count(line, "|") <= 2 {
 		// Mixed format: starts with "| " then tab-separated.
 		line = strings.TrimPrefix(line, "|")
 		line = strings.TrimSpace(line)
@@ -816,6 +821,19 @@ func extractCellURL(cellValue string) string {
 type markdownLink struct {
 	label  string
 	target string
+}
+
+// firstNumberedLink returns the first link in a Report cell whose label is a
+// report number (`[61](../reports/061-….md)`). It walks parseMarkdownLinks so
+// a target with parentheses, such as `001-acme-(berlin)-….md`, survives whole
+// (career-ops-hq/career-ops#5482).
+func firstNumberedLink(cell string) (markdownLink, bool) {
+	for _, link := range parseMarkdownLinks(cell) {
+		if reReportLabel.MatchString(link.label) {
+			return link, true
+		}
+	}
+	return markdownLink{}, false
 }
 
 // parseMarkdownLinks returns every markdown link in value, in order. Mirrors

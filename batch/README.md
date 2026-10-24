@@ -1,6 +1,6 @@
 # Batch Processing
 
-Process multiple job offers in parallel via headless workers. Each worker runs the full evaluation pipeline (A-F report + PDF + tracker line) autonomously. See the **Headless / Batch Mode** table in `AGENTS.md` for the correct command per CLI.
+Process multiple job offers via headless workers. Each worker runs the full evaluation pipeline (A-F report + PDF + tracker line) autonomously. Workers are `claude -p` by default; `--cli NAME` selects `opencode`, `gemini`, `qwen` or `grok` instead (`--model NAME` picks that CLI's model). Only `claude` workers run in parallel; the other CLIs run one offer at a time. The **Headless / Batch Mode** table in `AGENTS.md` is not the runner's `--cli` list: it includes CLIs the runner does not launch, and it has no Gemini row because Gemini CLI is now a legacy wrapper (see `docs/SUPPORTED_CLIS.md`).
 
 ## Quick Start
 
@@ -30,14 +30,20 @@ Process multiple job offers in parallel via headless workers. Each worker runs t
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--parallel N` | `1` | Number of concurrent headless workers |
+| `--cli NAME` | `claude` | Worker CLI: `claude`, `opencode`, `gemini`, `qwen` or `grok`. Only `claude` runs in parallel and retries; the others run one offer at a time, one attempt each |
+| `--model NAME` | per CLI | Model for the worker CLI. For `claude`, overrides the model resolved from `spend_tier` in `config/profile.yml` |
+| `--parallel N` | `3` for `claude`, `1` otherwise | Number of concurrent headless workers; after a rate limit the rest of the batch runs on 1 |
 | `--dry-run` | off | Preview pending offers without processing |
 | `--retry-failed` | off | Only retry offers marked as `failed` in state |
 | `--resume-paused` | off | Resume offers paused after a Claude session/rate limit |
 | `--start-from N` | `0` | Skip offers with ID below N |
-| `--limit N` | `0` | Max number of offers to process in this run (0 = no limit) |
+| `--company A,B` | off | Only process offers whose company matches one of the comma-separated names (case- and punctuation-insensitive substring of the URL or of the company in `notes`, i.e. the part before ` - ` in `Company - Role`); applied before `--limit` |
+| `--limit N` | no limit | Max number of offers to process in this run; must be a positive integer (`0` is rejected), so omit the flag for no limit |
+| `--min-score N` | `0` (off) | Record offers that score below N as `skipped` instead of `completed` |
+| `--skip-pdf` | off | Skip PDF generation; the tracker PDF column gets ❌ |
 | `--max-retries N` | `2` | Max retry attempts per offer before giving up |
 | `--worker-timeout N` | `1800` | Stop a worker that runs longer than N seconds and mark the offer failed (0 = no limit) |
+| `--thin-action MODE` | `webfetch` | What to do when no usable JD text could be fetched (JS-rendered page, empty shell). `webfetch`: the worker tries WebFetch. `skip`: record the offer as skipped (`needs-playwright`), spawn no worker. `browser-extract`: render the page with `browser-extract.mjs` (headless Chromium, no model tokens) and give the text to the worker. Retryable outcomes are recorded as `failed` and picked up again by `--retry-failed` (each spends one of `--max-retries`): no HTTP response from the fetch (DNS, refused, timeout, TLS), and for `browser-extract` a missing Playwright, `empty_text` or `navigation_error`. Anything else is terminal `skipped` |
 | `--rate-limit-sleep N` | `300` | Maximum adaptive retry delay in seconds (0–2147483647); use `0` to pause the batch immediately |
 
 ### Adaptive rate-limit retries (Claude only)
@@ -63,6 +69,17 @@ including in serial mode. `--max-retries` still bounds retries; once exhausted,
 the existing failure path applies. `--rate-limit-sleep 0` and session-limit
 pauses retain their existing behavior. Actual waits appear in the console and
 the `rate_limited` state note; the TSV schema is unchanged.
+
+### Checking progress
+
+| Flag | Description |
+|------|-------------|
+| `--status` | Print batch progress and a per-offer table, then exit |
+| `--summary` | With `--status`, print the totals only |
+| `--full` | With `--status`, print the per-offer table (the default) |
+| `--watch` | Refresh progress live, with the per-offer table, until the run completes |
+
+`./batch/batch-runner.sh --help` prints every flag.
 
 ## Directory Layout
 

@@ -81,6 +81,7 @@ function splitEnv(extra = {}) {
     CAREER_OPS_REPORTS_DIR: '',
     CAREER_OPS_ADDITIONS: '',
     CAREER_OPS_BATCH_STATE: '',
+    CAREER_OPS_PROFILE: '',
     ...extra,
   };
 }

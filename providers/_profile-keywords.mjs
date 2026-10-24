@@ -16,7 +16,7 @@
 // would require changing the Provider.fetch(entry, ctx) contract itself.
 
 import { existsSync, readFileSync } from 'fs';
-import * as yaml from 'js-yaml';
+import { loadYaml } from '../lib/yaml-document.mjs';
 import { getProfilePath } from '../path-resolver.mjs';
 
 // Matches the CAREER_OPS_PROFILE override already honored by scan.mjs,
@@ -65,7 +65,7 @@ export function profileTargetKeywords(profile) {
 export function resolveProfileKeywords(profilePath = defaultProfilePath()) {
   if (!existsSync(profilePath)) return [];
   try {
-    const profile = yaml.load(readFileSync(profilePath, 'utf-8')) || {};
+    const profile = loadYaml(readFileSync(profilePath, 'utf-8')) || {};
     return profileTargetKeywords(profile);
   } catch {
     return [];

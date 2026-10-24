@@ -32,6 +32,7 @@ for (const relativePath of [
   'pipeline-lock.mjs',
   // ...which runs the shared lock protocol from lib/dir-lock.mjs (#5358).
   'lib/dir-lock.mjs',
+  'lib/yaml-document.mjs',
   // ollama-eval/reserve-report-num resolve user-layer paths via
   // path-resolver.mjs (CAREER_OPS_ROOT), so the fixture carries that too.
   'path-resolver.mjs',

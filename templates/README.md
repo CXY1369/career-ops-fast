@@ -8,7 +8,7 @@ System-layer template files used by career-ops scripts and modes. These files ar
 |------|---------|---------|
 | `cv-template.html` | `generate-pdf.mjs` | HTML/CSS template for ATS-optimized CV PDFs |
 | `cv-template.{compact,executive,jake,leadership,modern}.html` | `generate-pdf.mjs`, `build-cv-html.mjs` (via `cv-templates.mjs`) | Named CV variants selectable per CV or as a `cv.template` default. Same placeholder tokens and ATS rules as `cv-template.html`. See detailed section below. |
-| `resume-template.html` | `generate-pdf.mjs` (via `--template`) | Resume-branded variant of `cv-template.html`. Same layout and placeholder tokens; differs in: `<title>` reads "Resume" instead of "CV", omits Certifications section (but keeps Awards & Honors), targets 1–2 page US/industry format. See detailed section below. |
+| `resume-template.html` | `build-cv-html.mjs` (template path as its optional third argument) | Resume-branded variant of `cv-template.html`. Same layout and placeholder tokens; differs in: `<title>` reads "Resume" instead of "CV", omits Certifications section (but keeps Awards & Honors), targets 1–2 page US/industry format. See detailed section below. |
 | `cv-template.tex` | `generate-latex.mjs` | LaTeX/Overleaf template for ATS-optimized CV PDFs |
 | `cv-template.cjk.tex` | `build-cv-latex.mjs --template=cjk`, `generate-latex.mjs` | CJK (Chinese/Japanese/Korean) variant of `cv-template.tex` — loads `fontspec`+`xeCJK`. Requires the `tectonic` engine (XeTeX backend); pdflatex still cannot render CJK. See "CJK variant" below and `modes/latex.md`. |
 | `portals.example.yml` | Onboarding | Example portal scanner configuration (copy to `portals.yml` to activate) |
@@ -103,6 +103,12 @@ Resume-branded variant of `cv-template.html` for US/industry job applications. K
 - **Awards & Honors is kept** — unlike Certifications. A contest medal or dean's list is a competitive signal rather than academic filler, and it is the strongest line an early-career candidate has when the experience section is thin. It costs nothing when unused: no entries means no section.
 
 Otherwise uses the same placeholder tokens (`{{NAME}}`, `{{SUMMARY_TEXT}}`, etc.) and is fully compatible with the existing PDF pipeline.
+
+**Usage:** `cv-templates.mjs` only discovers files named `cv-template*`, so this template is not selectable by name or through `cv.template`. Pass its path to `build-cv-html.mjs` instead, then render the HTML with `generate-pdf.mjs` as usual:
+
+```bash
+node build-cv-html.mjs payload.json output/resume.html templates/resume-template.html
+```
 
 **Keep in sync:** When updating `cv-template.html`, apply matching changes to `resume-template.html` (preserving the differences noted above).
 

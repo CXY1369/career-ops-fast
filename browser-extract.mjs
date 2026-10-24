@@ -45,7 +45,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import * as yaml from 'js-yaml';
+import { loadYaml } from './lib/yaml-document.mjs';
 import { LIVENESS_CONTEXT_OPTIONS, rejectPrivateOrInvalid } from './liveness-browser.mjs';
 import { getCareerOpsRoot, getProfilePath } from './path-resolver.mjs';
 import { resolveAtsApi, JD_TEXT_API_ATS } from './liveness-api.mjs';
@@ -94,7 +94,7 @@ const NAV_LABEL_STOPWORDS = new Set([
 export function resolveExtractorMode(profilePath = getProfilePath()) {
   try {
     if (!existsSync(profilePath)) return 'mcp';
-    const raw = yaml.load(readFileSync(profilePath, 'utf-8')) || {};
+    const raw = loadYaml(readFileSync(profilePath, 'utf-8')) || {};
     const v = raw?.scan?.extractor;
     return v === 'cli' ? 'cli' : 'mcp';
   } catch {
