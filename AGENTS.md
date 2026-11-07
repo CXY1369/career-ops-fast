@@ -516,7 +516,7 @@ A single-string `modes_dir` (today's default, ~90% of users) behaves exactly as 
 Apply reads and searches only this checkout, plus the data root when `CAREER_OPS_ROOT` or `CAREER_OPS_DATA_DIR` is set. Run `node apply-scope.mjs root` and use only the directories it prints.
 
 - Do not search `$HOME`. Do not grep or open another career-ops install.
-- Open forms in a Playwright browser this project launches. Run `node apply-scope.mjs launch-options` and pass that object to `chromium.launch`. Do not call `chromium.connect` or `connectOverCDP`. Do not read `DevToolsActivePort`. Do not pass a remote-debugging port or a Chrome user-data directory.
+- If an authorized browser connector (for example ChatGPT in Chrome or claude-in-chrome) is connected and exposes the candidate's current Chrome, use that connected Chrome first so existing login/session state and Simplify are available. Do not launch Playwright first or ask the candidate to log in again. If no authorized connector is available, open forms in the isolated Playwright browser this project launches: run `node apply-scope.mjs launch-options` and pass that object to `chromium.launch`. Never simulate a connector with `chromium.connect`, `connectOverCDP`, `DevToolsActivePort`, a remote-debugging port, or a Chrome user-data directory.
 - If Playwright is unavailable, ask the candidate to paste the questions or share a screenshot.
 - Do not submit the form. Ethical Use still holds. Stop before Submit, Send, or Apply until the candidate confirms they submitted it.
 

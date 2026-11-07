@@ -81,7 +81,8 @@
     "build:dashboard": "node build-dashboard.mjs",
     "serve:dashboard": "cd dashboard && go run .",
     "postinstall": "node -e \"process.exit(['','0','false'].includes((process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD||'').toLowerCase())?1:0)\" || npx playwright install chromium || npx playwright install chromium || node -e \"console.warn('\\ncareer-ops: could not install Playwright Chromium. Everything else is installed; PDF generation and browser checks need it. Run: npx playwright install chromium')\"",
-    "manifesto": "node manifesto.mjs"
+    "manifesto": "node manifesto.mjs",
+    "resume:resolve": "node resolve-tailored-resume.mjs"
   },
   "keywords": [
     "ai",

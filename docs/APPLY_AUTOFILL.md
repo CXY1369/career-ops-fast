@@ -1,6 +1,6 @@
 # ATS Auto-Fill Flow (Apply Mode)
 
-The `apply` mode interactive assistant helps you fill out applications for job postings. It opens the form in a Playwright browser this project launches (`node apply-scope.mjs launch-options` → `chromium.launch`), reads the questions on that page, and drafts personalized answers based on your profile and the evaluated report. It does not attach to your ordinary system browser or a remote-debugging port.
+The `apply` mode interactive assistant helps you fill out applications for job postings. It first checks for an authorized browser connector such as ChatGPT in Chrome or claude-in-chrome. When available, it uses the user's existing Chrome session and lets Simplify autofill routine fields, then reviews the result and fills only gaps and open-ended questions. When no connector is available, it launches the isolated Playwright fallback (`node apply-scope.mjs launch-options` → `chromium.launch`) and fills from the profile and evaluated report. It never simulates the connector with a remote-debugging port, `connectOverCDP`, or a Chrome user-data directory.
 
 **CRITICAL RULE: Career-Ops never submits.**
 The agent prepares the responses, selects the options, and types out the text fields. **You always click Submit.** This ensures you have the final say and gives you a chance to review the application before it is sent.

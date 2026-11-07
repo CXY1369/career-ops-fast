@@ -2,7 +2,7 @@
 
 > Apply `voice-dna.md` (if present) to free-text answers and cover-letter fields — full guardrail, conversational voice included (Tier 1 + Tier 2). See `_writing.md` → Voice DNA.
 
-Interactive mode for filling out an application form. Open the form in a Playwright browser this project launches, load the previous context of the job, and generate a response for each question.
+Interactive mode for filling out an application form. Prefer an authorized connection to the user's existing Chrome (and Simplify) when available; otherwise use the isolated Playwright browser this project launches. Load the previous context of the job and generate a response for each question.
 
 **Unattended runs** (`modes/_shared.md` → **Unattended runs**): never ask, never wait and never submit. A blacklist hit stops before drafting and ends with `needs_confirmation: blacklist "{company}" - rerun with "apply anyway" to draft`. A company or role mismatch, or an agency that needs acknowledgement, stops before drafting and ends with `needs_confirmation: apply_preflight {company} - confirm the company and role, then rerun`. A posting that appears closed ends with `needs_confirmation: posting_closed {company} - rerun with the reason to apply anyway`. When liveness cannot be verified, the run ends with `needs_confirmation: liveness_unverified {company} - confirm the company, role and active posting, then rerun`. Otherwise draft only answers backed by the tailored CV, `cv.md`, `config/profile.yml`, the report, or answers the prompt gives for this application, leave every other field blank, and end with `needs_confirmation: apply_input {n} questions - answer them, then rerun`.
 
@@ -12,7 +12,7 @@ Work only inside this checkout. Run `node apply-scope.mjs root` and read or sear
 
 Do not search the home directory. Do not grep or open another career-ops install.
 
-Open the form in a Playwright browser this project launches. Run `node apply-scope.mjs launch-options` and pass that object to `chromium.launch`. Do not call `chromium.connect` or `connectOverCDP`. Do not read `DevToolsActivePort`. Do not pass a remote-debugging port or a Chrome user-data directory.
+At the start of the run, check for an authorized browser connector (for example ChatGPT in Chrome or claude-in-chrome). If it is connected and exposes a usable Chrome tab, use that tab and its existing session. Do not launch Playwright first or make the candidate log in again. If no authorized connector is available, open the form in the isolated Playwright browser this project launches: run `node apply-scope.mjs launch-options` and pass that object to `chromium.launch`. Never simulate a connector with `chromium.connect`, `connectOverCDP`, `DevToolsActivePort`, a remote-debugging port, or a Chrome user-data directory.
 
 If Playwright is not available, ask the candidate to paste the questions or share a screenshot.
 
@@ -20,8 +20,9 @@ Do not submit the form. Stop before Submit, Send, or Apply. Continue only after 
 
 ## Requirements
 
-- **Best with Playwright in visible mode.** The candidate sees the browser this project launched. The agent uses that page.
-- **Without Playwright.** The candidate shares a screenshot or pastes the questions. Do not attach to a browser the candidate already has open.
+- **Best with a connected Chrome.** The candidate sees the same browser and Simplify can perform its normal autofill. The agent reviews the result, uploads the tailored resume, and fills only the gaps and open-ended questions.
+- **Playwright fallback.** The candidate sees the isolated browser this project launched. The agent fills every field from the precomputed answer map.
+- **Without either path.** The candidate shares a screenshot or pastes the questions. Do not improvise a connection to an ordinary browser.
 
 ## Workflow
 
@@ -158,9 +159,11 @@ Before drafting answers, read the matched report's Block G fixed-term finding an
 
 ## Step 1 — Detect the job
 
-**With Playwright:** Run `node apply-scope.mjs launch-options` and launch Chromium with that object. Open the posting URL in that browser. Snapshot that page. Read the title, the URL, and the visible content. Do not attach to a browser the candidate already has open. Do not read `DevToolsActivePort`.
+**With a connected browser:** reuse the already connected Chrome tab, or open the posting in that same connected Chrome. Do not launch a second browser merely because the form needs login.
 
-**Without Playwright:** Ask the candidate to:
+**With Playwright fallback:** run `node apply-scope.mjs launch-options` and launch Chromium with that object. Open the posting URL in that browser. Snapshot that page. Read the title, the URL, and the visible content. Do not attach to a browser the candidate already has open. Do not read `DevToolsActivePort`.
+
+**Without a connected browser or Playwright:** Ask the candidate to:
 - Share a screenshot of the form (Read tool can read images)
 - Or paste the form questions as text
 - Or say the company and the role so we can search `reports/` under the roots from `node apply-scope.mjs root`
