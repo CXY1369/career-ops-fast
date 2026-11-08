@@ -1,0 +1,9 @@
+# local-paths.txt — fork-only files this checkout owns.
+# See config/local-paths.example.txt for format and rules.
+
+.cursor/rules/career-ops.mdc
+apply-form.mjs
+apply-run-guard.mjs
+learnings/
+modes/pdf-canva.md
+resolve-tailored-resume.mjs
