@@ -78,6 +78,63 @@ function startArgs(overrides = {}) {
   return args;
 }
 
+function writeEvents(sandbox, events) {
+  writeFileSync(
+    join(sandbox.root, 'data', 'apply-runs.jsonl'),
+    `${events.map((event) => JSON.stringify(event)).join('\n')}\n`,
+  );
+}
+
+function writeRunLock(sandbox, owner) {
+  mkdirSync(join(sandbox.root, 'data', '.apply-run.lock'), { recursive: true });
+  writeFileSync(
+    join(sandbox.root, 'data', '.apply-run.lock', 'owner.json'),
+    `${JSON.stringify(owner, null, 2)}\n`,
+  );
+}
+
+function fixtureRun({
+  runId = 'fixture-run',
+  startedAt = new Date(Date.now() - 60_000).toISOString(),
+  company = 'Fixture Co',
+  role = 'Fixture Role',
+  url = 'https://jobs.example.test/fixture',
+  browser = 'chrome',
+  simplify = false,
+  coverLetter = 'skip',
+} = {}) {
+  return {
+    event: 'run_started',
+    schema_version: 1,
+    run_id: runId,
+    company,
+    role,
+    url,
+    browser,
+    simplify,
+    resume: 'output/resume.pdf',
+    cover_letter: coverLetter,
+    started_at: startedAt,
+    at: startedAt,
+    warnings: [],
+  };
+}
+
+function ownerFor(run, overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: run.run_id,
+    started_at: run.started_at,
+    pid: 999_999_999,
+    state: 'active',
+    lease_active_ms: 0,
+    last_active_since: run.started_at,
+    paused_at: null,
+    recover_count: 0,
+    ...overrides,
+  };
+}
+
 function lockOwner(sandbox) {
   return JSON.parse(readFileSync(join(sandbox.root, 'data', '.apply-run.lock', 'owner.json'), 'utf8'));
 }
@@ -102,6 +159,9 @@ test('start validates inputs, creates one lease, and rejects a second active run
   assert.equal(owner.run_id, first.run_id);
   assert.ok(Number.isInteger(owner.pid) && owner.pid > 0);
   assert.ok(!Number.isNaN(Date.parse(owner.started_at)));
+  assert.equal(owner.state, 'active');
+  assert.equal(owner.lease_active_ms, 0);
+  assert.equal(owner.last_active_since, first.started_at);
 
   const second = run(sandbox, startArgs({ company: 'Other' }));
   assert.notEqual(second.status, 0);
@@ -282,5 +342,232 @@ test('user_change before review_reached is rejected', (t) => {
   assert.notEqual(result.status, 0);
   assert.match(`${result.stdout}\n${result.stderr}`, /review/i);
   run(sandbox, ['abort']);
+});
+
+test('pause freezes the active lease while wall-clock time advances', (t) => {
+  const sandbox = box(t);
+  const nowMs = Date.now();
+  const startedAt = new Date(nowMs - 50 * 60 * 1000).toISOString();
+  const pausedAt = new Date(nowMs - 40 * 60 * 1000).toISOString();
+  const runRecord = fixtureRun({ runId: 'pause-freeze', startedAt });
+  writeEvents(sandbox, [
+    runRecord,
+    {
+      event: 'run_paused',
+      schema_version: 1,
+      run_id: runRecord.run_id,
+      paused_at: pausedAt,
+      at: pausedAt,
+      lease_active_ms: 10 * 60 * 1000,
+      note: 'waiting for login',
+    },
+  ]);
+  writeRunLock(sandbox, ownerFor(runRecord, {
+    state: 'paused',
+    lease_active_ms: 10 * 60 * 1000,
+    last_active_since: null,
+    paused_at: pausedAt,
+  }));
+
+  const resumed = run(sandbox, ['resume']);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(lockOwner(sandbox).state, 'active');
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+});
+
+test('pause without an active run is rejected', (t) => {
+  const sandbox = box(t);
+  const result = run(sandbox, ['pause']);
+  assert.notEqual(result.status, 0);
+  assert.equal(existsSync(join(sandbox.root, 'data', 'apply-runs.jsonl')), false);
+});
+
+test('resume while active is rejected', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.notEqual(run(sandbox, ['resume']).status, 0);
+  run(sandbox, ['abort']);
+});
+
+test('double pause is rejected', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['pause', '--note', 'waiting']).status, 0);
+  assert.notEqual(run(sandbox, ['pause']).status, 0);
+  run(sandbox, ['abort']);
+});
+
+test('a resumed run can reach Review and finish handed_off', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['pause']).status, 0);
+  assert.equal(run(sandbox, ['resume']).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+});
+
+test('a paused run blocks a new start', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['pause']).status, 0);
+  const result = run(sandbox, startArgs({ company: 'Other Co' }));
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /paused|run|lock/i);
+  run(sandbox, ['abort']);
+});
+
+test('a paused run can finish as blocked', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['pause', '--note', 'login required']).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'blocked', '--note', 'User login required']).status, 0);
+  assert.equal(existsSync(join(sandbox.root, 'data', '.apply-run.lock')), false);
+});
+
+test('recover accepts an active run whose lease expired before start materialized expired status', (t) => {
+  const sandbox = box(t);
+  const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+  const runRecord = fixtureRun({ runId: 'recover-active-expired', startedAt });
+  writeEvents(sandbox, [runRecord]);
+  writeRunLock(sandbox, ownerFor(runRecord));
+
+  const recovered = run(sandbox, ['recover', '--run-id', runRecord.run_id]);
+  assert.equal(recovered.status, 0, recovered.stderr);
+  const owner = lockOwner(sandbox);
+  assert.equal(owner.run_id, runRecord.run_id);
+  assert.equal(owner.lease_active_ms, 0);
+  const events = logLines(sandbox);
+  const recovery = events.at(-1);
+  assert.equal(recovery.event, 'run_recovered');
+  assert.equal(recovery.lease_active_ms_before >= 45 * 60 * 1000, true);
+  assert.equal(recovery.recover_count, 1);
+  assert.equal(run(sandbox, ['finish', '--status', 'blocked', '--note', 'test cleanup']).status, 0);
+  const finished = logLines(sandbox).at(-1);
+  assert.equal(finished.active_seconds >= 45 * 60, true);
+});
+
+test('recover rejects a mismatched run id without changing state', (t) => {
+  const sandbox = box(t);
+  const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+  const runRecord = fixtureRun({ runId: 'recover-target', startedAt });
+  writeEvents(sandbox, [runRecord]);
+  writeRunLock(sandbox, ownerFor(runRecord));
+  const before = readFileSync(join(sandbox.root, 'data', 'apply-runs.jsonl'), 'utf8');
+  const result = run(sandbox, ['recover', '--run-id', 'wrong-run']);
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(join(sandbox.root, 'data', 'apply-runs.jsonl'), 'utf8'), before);
+});
+
+test('a run can be recovered at most once', (t) => {
+  const sandbox = box(t);
+  const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+  const runRecord = fixtureRun({ runId: 'recover-once', startedAt });
+  writeEvents(sandbox, [runRecord]);
+  writeRunLock(sandbox, ownerFor(runRecord));
+  assert.equal(run(sandbox, ['recover', '--run-id', runRecord.run_id]).status, 0);
+  assert.notEqual(run(sandbox, ['recover', '--run-id', runRecord.run_id]).status, 0);
+  assert.equal(logLines(sandbox).filter((event) => event.event === 'run_recovered').length, 1);
+  run(sandbox, ['abort']);
+});
+
+test('a later run prevents recovery of an older expired run', (t) => {
+  const sandbox = box(t);
+  const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+  const oldRun = fixtureRun({ runId: 'old-recover-target', startedAt });
+  writeEvents(sandbox, [oldRun]);
+  writeRunLock(sandbox, ownerFor(oldRun));
+  assert.equal(run(sandbox, startArgs({ company: 'New Co' })).status, 0);
+  const result = run(sandbox, ['recover', '--run-id', oldRun.run_id]);
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}\n${result.stderr}`, /newer|active|run|recover/i);
+  run(sandbox, ['abort']);
+});
+
+test('a paused run older than 24 hours is expired by the next start', (t) => {
+  const sandbox = box(t);
+  const nowMs = Date.now();
+  const startedAt = new Date(nowMs - 26 * 60 * 60 * 1000).toISOString();
+  const pausedAt = new Date(nowMs - 25 * 60 * 60 * 1000).toISOString();
+  const oldRun = fixtureRun({ runId: 'old-paused', startedAt });
+  writeEvents(sandbox, [
+    oldRun,
+    {
+      event: 'run_paused',
+      schema_version: 1,
+      run_id: oldRun.run_id,
+      paused_at: pausedAt,
+      at: pausedAt,
+      lease_active_ms: 60_000,
+    },
+  ]);
+  writeRunLock(sandbox, ownerFor(oldRun, {
+    state: 'paused',
+    lease_active_ms: 60_000,
+    last_active_since: null,
+    paused_at: pausedAt,
+  }));
+  assert.equal(run(sandbox, startArgs({ company: 'New Co' })).status, 0);
+  const events = logLines(sandbox);
+  const expired = events.find((event) => event.run_id === oldRun.run_id && event.status === 'expired');
+  assert.ok(expired);
+  assert.equal(events.at(-1).event, 'run_started');
+  run(sandbox, ['abort']);
+});
+
+test('recover rebuilds a missing run lock', (t) => {
+  const sandbox = box(t);
+  const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+  const runRecord = fixtureRun({ runId: 'rebuild-lock', startedAt });
+  writeEvents(sandbox, [runRecord]);
+  const recovered = run(sandbox, ['recover', '--run-id', runRecord.run_id]);
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.equal(lockOwner(sandbox).run_id, runRecord.run_id);
+  run(sandbox, ['abort']);
+});
+
+test('JSONL state wins over a conflicting owner cache', (t) => {
+  const sandbox = box(t);
+  const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+  const runRecord = fixtureRun({ runId: 'jsonl-authority', startedAt });
+  writeEvents(sandbox, [runRecord]);
+  writeRunLock(sandbox, ownerFor(runRecord, {
+    state: 'paused',
+    lease_active_ms: 0,
+    last_active_since: null,
+    paused_at: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+  }));
+  assert.equal(run(sandbox, ['recover', '--run-id', runRecord.run_id]).status, 0);
+  assert.equal(lockOwner(sandbox).state, 'active');
+  run(sandbox, ['abort']);
+});
+
+test('multiple pause and resume intervals accumulate paused_seconds', (t) => {
+  const sandbox = box(t);
+  const nowMs = Date.now();
+  const startedAt = new Date(nowMs - 100_000).toISOString();
+  const pause1 = new Date(nowMs - 90_000).toISOString();
+  const resume1 = new Date(nowMs - 80_000).toISOString();
+  const pause2 = new Date(nowMs - 70_000).toISOString();
+  const resume2 = new Date(nowMs - 60_000).toISOString();
+  const runRecord = fixtureRun({ runId: 'timing-intervals', startedAt });
+  writeEvents(sandbox, [
+    runRecord,
+    { event: 'run_paused', schema_version: 1, run_id: runRecord.run_id, paused_at: pause1, at: pause1, lease_active_ms: 10_000 },
+    { event: 'run_resumed', schema_version: 1, run_id: runRecord.run_id, resumed_at: resume1, at: resume1, lease_active_ms: 10_000 },
+    { event: 'run_paused', schema_version: 1, run_id: runRecord.run_id, paused_at: pause2, at: pause2, lease_active_ms: 20_000 },
+    { event: 'run_resumed', schema_version: 1, run_id: runRecord.run_id, resumed_at: resume2, at: resume2, lease_active_ms: 20_000 },
+  ]);
+  writeRunLock(sandbox, ownerFor(runRecord, {
+    lease_active_ms: 20_000,
+    last_active_since: resume2,
+  }));
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+  const finished = logLines(sandbox).at(-1);
+  assert.equal(finished.pause_count, 2);
+  assert.ok(finished.paused_seconds >= 19 && finished.paused_seconds <= 21);
+  assert.ok(finished.active_seconds >= 79 && finished.active_seconds <= 82);
+  assert.ok(finished.total_seconds >= finished.active_seconds + finished.paused_seconds);
 });
 
