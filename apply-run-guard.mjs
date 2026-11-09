@@ -317,6 +317,8 @@ function replay(events) {
         simplify_done_at: null,
         review_reached_at: null,
         last_review_reached_at: null,
+        review_valid: false,
+        review_invalidated_at: null,
         finished_at: null,
         submitted_at: null,
         last_user_change_at: null,
@@ -343,10 +345,13 @@ function replay(events) {
       run.review_count += 1;
       run.review_reached_at ??= event.at;
       run.last_review_reached_at = event.at;
+      run.review_valid = true;
     } else if (event.event === 'user_change') {
       run.user_change_count += 1;
       run.last_user_change_at = event.at;
       run.last_user_change_note = event.note;
+      run.review_valid = false;
+      run.review_invalidated_at = event.at;
     } else if (event.event === 'run_paused') {
       const pausedAt = event.paused_at ?? event.at;
       if (run.status !== 'active' || !run.last_active_since) throw new GuardError(`Invalid pause event for run_id ${run.run_id}.`);
@@ -377,6 +382,15 @@ function replay(events) {
         ? event.recover_count
         : run.recovery_count + 1;
       run.recovered_at = recoveredAt;
+      if (run.review_count > 0) {
+        run.review_valid = false;
+        run.review_invalidated_at = recoveredAt;
+        run.review_count = 0;
+        run.review_reached_at = null;
+        run.last_review_reached_at = null;
+        run.user_change_count = 0;
+        run.last_user_change_at = null;
+      }
     } else if (event.event === 'run_finished') {
       const finishedAt = event.finished_at ?? event.at;
       if (run.status === 'active') addActiveInterval(run, finishedAt);
@@ -418,6 +432,8 @@ function runSnapshot(run, at, status, event = 'run_finished', extra = {}) {
     started_at: run.started_at,
     simplify_done_at: run.simplify_done_at,
     review_reached_at: run.review_reached_at,
+    review_valid: run.review_valid,
+    review_invalidated_at: run.review_invalidated_at,
     finished_at: at,
     ...timingForRun(run, at),
     status,
@@ -798,9 +814,14 @@ function finishCommand(values, positional, info) {
   return withControlLock(info, () => {
     const run = requireLiveRun(info, status === 'blocked' ? ['active', 'paused'] : ['active']);
     if (status === 'handed_off') {
-      if (run.review_count < 1) throw new GuardError('handed_off requires review_reached first.');
+      if (!run.review_valid) {
+        throw new GuardError('handed_off requires a current Review checkpoint after the latest user change or recovery.');
+      }
       if (run.last_user_change_at && Date.parse(run.last_user_change_at) > Date.parse(run.last_review_reached_at)) {
         throw new GuardError('A user_change occurred after the last review; reach Review again first.');
+      }
+      if (run.recovered_at && Date.parse(run.recovered_at) > Date.parse(run.last_review_reached_at)) {
+        throw new GuardError('The run was recovered after the last Review; reach the current Review page again first.');
       }
     }
     const event = runSnapshot(run, now(), status, 'run_finished', note ? { note } : {});

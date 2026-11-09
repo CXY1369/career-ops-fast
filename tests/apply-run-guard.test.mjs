@@ -210,6 +210,7 @@ test('state guards enforce the minimal review sequence and leave human logs unto
   assert.equal(finished.status, 'handed_off');
   assert.ok(!Number.isNaN(Date.parse(finished.finished_at)));
   assert.ok(finished.review_reached_at);
+  assert.equal(finished.review_valid, true);
   assert.ok(finished.simplify_done_at);
   assert.ok(Number.isFinite(finished.total_seconds));
   assert.ok(Number.isFinite(finished.simplify_seconds));
@@ -445,6 +446,61 @@ test('recover accepts an active run whose lease expired before start materialize
   assert.equal(run(sandbox, ['finish', '--status', 'blocked', '--note', 'test cleanup']).status, 0);
   const finished = logLines(sandbox).at(-1);
   assert.equal(finished.active_seconds >= 45 * 60, true);
+});
+
+test('recovery invalidates a prior Review checkpoint until Review is reached again', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+
+  const events = logLines(sandbox);
+  const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+  events[0].started_at = startedAt;
+  events[0].at = startedAt;
+  writeEvents(sandbox, events);
+  writeRunLock(sandbox, ownerFor(events[0], { last_active_since: startedAt }));
+
+  assert.equal(run(sandbox, ['recover', '--run-id', events[0].run_id]).status, 0);
+  const staleFinish = run(sandbox, ['finish', '--status', 'handed_off']);
+  assert.notEqual(staleFinish.status, 0);
+  assert.match(`${staleFinish.stdout}\n${staleFinish.stderr}`, /review|recover|current/i);
+
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+});
+
+test('recovery after a re-review starts a fresh Review epoch', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(run(sandbox, ['mark', 'user_change', '--note', 'corrected application field']).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+
+  const events = logLines(sandbox);
+  const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+  events[0].started_at = startedAt;
+  events[0].at = startedAt;
+  writeEvents(sandbox, events);
+  writeRunLock(sandbox, ownerFor(events[0], { last_active_since: startedAt }));
+
+  assert.equal(run(sandbox, ['recover', '--run-id', events[0].run_id]).status, 0);
+  assert.notEqual(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+});
+
+test('user_change invalidates Review until the corrected form reaches Review again', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(run(sandbox, ['mark', 'user_change', '--note', 'corrected application field']).status, 0);
+
+  const staleFinish = run(sandbox, ['finish', '--status', 'handed_off']);
+  assert.notEqual(staleFinish.status, 0);
+  assert.match(`${staleFinish.stdout}\n${staleFinish.stderr}`, /review/i);
+
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
 
 test('recover rejects a mismatched run id without changing state', (t) => {
