@@ -78,6 +78,11 @@ function startArgs(overrides = {}) {
   return args;
 }
 
+function markChromeHandoff(sandbox) {
+  const result = run(sandbox, ['mark', 'browser_handoff', '--visible', 'true', '--method', 'markHandoff']);
+  assert.equal(result.status, 0, result.stderr);
+}
+
 function writeEvents(sandbox, events) {
   writeFileSync(
     join(sandbox.root, 'data', 'apply-runs.jsonl'),
@@ -202,6 +207,7 @@ test('state guards enforce the minimal review sequence and leave human logs unto
   assert.notEqual(run(sandbox, ['review_reached']).status, 0);
   assert.equal(run(sandbox, ['mark', 'user_change', '--note', 'Add the prepared cover letter']).status, 0);
   assert.equal(run(sandbox, ['review_reached']).status, 0);
+  markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
   assert.equal(existsSync(join(sandbox.root, 'data', '.apply-run.lock')), false);
   assert.equal(readFileSync(join(sandbox.root, 'data', 'application-runs.md'), 'utf8'), 'human log\n');
@@ -239,6 +245,7 @@ test('Chrome without --simplify skips the Simplify checkpoint', (t) => {
   assert.equal(run(sandbox, startArgs()).status, 0);
   assert.notEqual(run(sandbox, ['mark', 'simplify_done']).status, 0);
   assert.equal(run(sandbox, ['review_reached']).status, 0);
+  markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
 
@@ -374,6 +381,7 @@ test('pause freezes the active lease while wall-clock time advances', (t) => {
   assert.equal(resumed.status, 0, resumed.stderr);
   assert.equal(lockOwner(sandbox).state, 'active');
   assert.equal(run(sandbox, ['review_reached']).status, 0);
+  markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
 
@@ -405,6 +413,7 @@ test('a resumed run can reach Review and finish handed_off', (t) => {
   assert.equal(run(sandbox, ['pause']).status, 0);
   assert.equal(run(sandbox, ['resume']).status, 0);
   assert.equal(run(sandbox, ['review_reached']).status, 0);
+  markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
 
@@ -466,6 +475,7 @@ test('recovery invalidates a prior Review checkpoint until Review is reached aga
   assert.match(`${staleFinish.stdout}\n${staleFinish.stderr}`, /review|recover|current/i);
 
   assert.equal(run(sandbox, ['review_reached']).status, 0);
+  markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
 
@@ -486,6 +496,7 @@ test('recovery after a re-review starts a fresh Review epoch', (t) => {
   assert.equal(run(sandbox, ['recover', '--run-id', events[0].run_id]).status, 0);
   assert.notEqual(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
   assert.equal(run(sandbox, ['review_reached']).status, 0);
+  markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
 
@@ -500,6 +511,7 @@ test('user_change invalidates Review until the corrected form reaches Review aga
   assert.match(`${staleFinish.stdout}\n${staleFinish.stderr}`, /review/i);
 
   assert.equal(run(sandbox, ['review_reached']).status, 0);
+  markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
 
@@ -619,11 +631,65 @@ test('multiple pause and resume intervals accumulate paused_seconds', (t) => {
     last_active_since: resume2,
   }));
   assert.equal(run(sandbox, ['review_reached']).status, 0);
+  markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
   const finished = logLines(sandbox).at(-1);
   assert.equal(finished.pause_count, 2);
   assert.ok(finished.paused_seconds >= 19 && finished.paused_seconds <= 21);
   assert.ok(finished.active_seconds >= 79 && finished.active_seconds <= 82);
   assert.ok(finished.total_seconds >= finished.active_seconds + finished.paused_seconds);
+});
+
+test('Chrome handed_off is rejected until a visible markHandoff attestation is recorded', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  const before = readFileSync(join(sandbox.root, 'data', 'apply-runs.jsonl'), 'utf8');
+  const blocked = run(sandbox, ['finish', '--status', 'handed_off']);
+  assert.notEqual(blocked.status, 0);
+  assert.match(`${blocked.stdout}\n${blocked.stderr}`, /markHandoff|browser_handoff|visible/i);
+  assert.equal(readFileSync(join(sandbox.root, 'data', 'apply-runs.jsonl'), 'utf8'), before);
+
+  const hidden = run(sandbox, ['mark', 'browser_handoff', '--visible', 'false', '--method', 'markHandoff']);
+  assert.notEqual(hidden.status, 0);
+  assert.equal(readFileSync(join(sandbox.root, 'data', 'apply-runs.jsonl'), 'utf8'), before);
+
+  markChromeHandoff(sandbox);
+  const handoff = logLines(sandbox).at(-1);
+  assert.equal(handoff.event, 'browser_handoff');
+  assert.equal(handoff.visible, true);
+  assert.equal(handoff.method, 'markHandoff');
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+  const finished = logLines(sandbox).at(-1);
+  assert.equal(finished.status, 'handed_off');
+  assert.equal(finished.browser_handoff_valid, true);
+  assert.equal(finished.browser_handoff_method, 'markHandoff');
+});
+
+test('a user change clears the Chrome handoff until Review and markHandoff are recorded again', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  markChromeHandoff(sandbox);
+  assert.equal(run(sandbox, ['mark', 'user_change', '--note', 'fix a review field']).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  const stale = run(sandbox, ['finish', '--status', 'handed_off']);
+  assert.notEqual(stale.status, 0);
+  assert.match(`${stale.stdout}\n${stale.stderr}`, /markHandoff|browser_handoff/i);
+  markChromeHandoff(sandbox);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+});
+
+test('Playwright handed_off does not require markHandoff, and Chrome blocked does not either', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs({ browser: 'playwright' })).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  const playwrightHandoff = run(sandbox, ['mark', 'browser_handoff', '--visible', 'true', '--method', 'markHandoff']);
+  assert.notEqual(playwrightHandoff.status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'blocked', '--note', 'Review tab disappeared']).status, 0);
 });
 

@@ -45,6 +45,7 @@ const HELP = `Usage:
   node apply-run-guard.mjs mark simplify_done
   node apply-run-guard.mjs mark user_change --note "reason"
   node apply-run-guard.mjs review_reached
+  node apply-run-guard.mjs mark browser_handoff --visible true --method markHandoff
   node apply-run-guard.mjs finish --status handed_off|blocked [--note "reason"]
   node apply-run-guard.mjs confirm-submitted
   node apply-run-guard.mjs abort [--note "reason"]
@@ -304,6 +305,12 @@ function applySummaryFields(run, event) {
   }
 }
 
+function clearBrowserHandoff(run) {
+  run.browser_handoff_at = null;
+  run.browser_handoff_valid = false;
+  run.browser_handoff_method = null;
+}
+
 function replay(events) {
   const runs = new Map();
   for (const [index, event] of events.entries()) {
@@ -319,6 +326,9 @@ function replay(events) {
         last_review_reached_at: null,
         review_valid: false,
         review_invalidated_at: null,
+        browser_handoff_at: null,
+        browser_handoff_valid: false,
+        browser_handoff_method: null,
         finished_at: null,
         submitted_at: null,
         last_user_change_at: null,
@@ -346,12 +356,21 @@ function replay(events) {
       run.review_reached_at ??= event.at;
       run.last_review_reached_at = event.at;
       run.review_valid = true;
+      clearBrowserHandoff(run);
+    } else if (event.event === 'browser_handoff') {
+      if (!run.review_valid || run.browser !== 'chrome' || event.visible !== true || event.method !== 'markHandoff') {
+        throw new GuardError(`Invalid browser_handoff event for run_id ${run.run_id}.`);
+      }
+      run.browser_handoff_valid = true;
+      run.browser_handoff_at = event.at;
+      run.browser_handoff_method = event.method;
     } else if (event.event === 'user_change') {
       run.user_change_count += 1;
       run.last_user_change_at = event.at;
       run.last_user_change_note = event.note;
       run.review_valid = false;
       run.review_invalidated_at = event.at;
+      clearBrowserHandoff(run);
     } else if (event.event === 'run_paused') {
       const pausedAt = event.paused_at ?? event.at;
       if (run.status !== 'active' || !run.last_active_since) throw new GuardError(`Invalid pause event for run_id ${run.run_id}.`);
@@ -391,6 +410,7 @@ function replay(events) {
         run.user_change_count = 0;
         run.last_user_change_at = null;
       }
+      clearBrowserHandoff(run);
     } else if (event.event === 'run_finished') {
       const finishedAt = event.finished_at ?? event.at;
       if (run.status === 'active') addActiveInterval(run, finishedAt);
@@ -434,6 +454,9 @@ function runSnapshot(run, at, status, event = 'run_finished', extra = {}) {
     review_reached_at: run.review_reached_at,
     review_valid: run.review_valid,
     review_invalidated_at: run.review_invalidated_at,
+    browser_handoff_at: run.browser_handoff_at,
+    browser_handoff_valid: run.browser_handoff_valid,
+    browser_handoff_method: run.browser_handoff_method,
     finished_at: at,
     ...timingForRun(run, at),
     status,
@@ -805,6 +828,37 @@ function markCommand(kind, values, positional, info) {
   });
 }
 
+function browserHandoffCommand(values, positional, info) {
+  if (positional.length) throw new GuardError(`Unexpected positional argument: ${positional[0]}`);
+  const visible = cleanText(values.visible, '--visible');
+  const method = cleanText(values.method, '--method');
+  const note = values.note === undefined ? undefined : cleanText(values.note, '--note');
+  if (visible !== 'true') {
+    throw new GuardError('--visible must be true. Record the handoff only after the Review tab is still visible.');
+  }
+  if (method !== 'markHandoff') throw new GuardError('Chrome handoff --method must be markHandoff.');
+  return withControlLock(info, () => {
+    const run = requireLiveRun(info, ['active']);
+    if (run.browser !== 'chrome') {
+      throw new GuardError('browser_handoff applies to Connected Chrome. Playwright does not use tab.markHandoff().');
+    }
+    if (!run.review_valid) throw new GuardError('browser_handoff requires a current Review checkpoint.');
+    if (run.browser_handoff_valid) throw new GuardError('browser_handoff was already recorded for this Review.');
+    const at = now();
+    appendEvent(info, {
+      event: 'browser_handoff',
+      run_id: run.run_id,
+      at,
+      visible: true,
+      method: 'markHandoff',
+      ...(note ? { note } : {}),
+    });
+    const updated = replay(readEvents(info)).find((item) => item.run_id === run.run_id);
+    writeOwnerFromRun(info, updated, at);
+    console.log(`Browser handoff recorded: ${at}`);
+  });
+}
+
 function finishCommand(values, positional, info) {
   if (positional.length) throw new GuardError(`Unexpected positional argument: ${positional[0]}`);
   const status = cleanText(values.status, '--status');
@@ -822,6 +876,9 @@ function finishCommand(values, positional, info) {
       }
       if (run.recovered_at && Date.parse(run.recovered_at) > Date.parse(run.last_review_reached_at)) {
         throw new GuardError('The run was recovered after the last Review; reach the current Review page again first.');
+      }
+      if (run.browser === 'chrome' && !run.browser_handoff_valid) {
+        throw new GuardError('handed_off requires a verified Chrome handoff after the current Review. Call tab.markHandoff(), confirm the Review tab is still visible, then mark browser_handoff --visible true --method markHandoff. Otherwise finish --status blocked.');
       }
     }
     const event = runSnapshot(run, now(), status, 'run_finished', note ? { note } : {});
@@ -897,6 +954,7 @@ function auditCommand(values, positional, info) {
         : (sameRunLock(info, run) && !leaseExpired(run) ? 'present' : 'missing or expired');
       console.log(`Lease: ${lease}; lease_active_seconds: ${Math.round(currentLeaseActiveMs(run) / 1000)}`);
       console.log(`Review count: ${run.review_count}; user changes: ${run.user_change_count}; recoveries: ${run.recovery_count}`);
+      if (run.browser === 'chrome') console.log(`Browser handoff: ${run.browser_handoff_valid ? 'recorded' : 'missing'}`);
     }
   }
   const latest = runs.at(-1);
@@ -932,7 +990,12 @@ function main(argv) {
   }
   if (command === 'mark') {
     const kind = argv[1];
-    if (!kind) throw new GuardError('mark requires simplify_done, review_reached, or user_change.');
+    if (!kind) throw new GuardError('mark requires simplify_done, review_reached, user_change, or browser_handoff.');
+    if (kind === 'browser_handoff') {
+      const { values, positional } = parseArgs(argv.slice(2), ['--visible', '--method', '--note']);
+      browserHandoffCommand(values, positional, info);
+      return 0;
+    }
     const { values, positional } = parseArgs(argv.slice(2), ['--note']);
     markCommand(kind, values, positional, info);
     return 0;
