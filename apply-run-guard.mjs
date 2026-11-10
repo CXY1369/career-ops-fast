@@ -36,18 +36,23 @@ const CONTROL_LOCK_NAME = '.apply-run-control.lock';
 const RUN_LOCK_NAME = '.apply-run.lock';
 const LOG_NAME = 'apply-runs.jsonl';
 const CONTROL_LOCK_RETRY_MS = 20;
+const COVER_LETTER_MODES = new Set(['manual', 'upload_required', 'upload_optional', 'absent']);
+const AVAILABILITY_MODES = new Set(['date', 'preserved', 'absent']);
+const MIN_AVAILABILITY_DAYS = 14;
 
 const HELP = `Usage:
-  node apply-run-guard.mjs start --company "Company" --role "Role" --url "https://..." --browser chrome|playwright --resume "output/tailored-resume.pdf" --cover-letter prepared|skip [--simplify]
+  node apply-run-guard.mjs start --company "Company" --role "Role" --url "https://..." --browser chrome|playwright --resume "output/tailored-resume.pdf" --cover-letter auto [--simplify]
   node apply-run-guard.mjs pause [--note "reason"]
   node apply-run-guard.mjs resume
   node apply-run-guard.mjs recover --run-id "<run-id>"
   node apply-run-guard.mjs mark simplify_done
+  node apply-run-guard.mjs mark cover_letter --mode manual|upload_required|upload_optional|absent [--note "evidence"]
+  node apply-run-guard.mjs mark review_reopened --note "reason"
   node apply-run-guard.mjs mark user_change --note "reason"
-  node apply-run-guard.mjs review_reached
+  node apply-run-guard.mjs review_reached --availability-mode date|preserved|absent [--availability-date YYYY-MM-DD] [--today YYYY-MM-DD]
   node apply-run-guard.mjs mark browser_handoff --visible true --method markHandoff
   node apply-run-guard.mjs finish --status handed_off|blocked [--note "reason"]
-  node apply-run-guard.mjs confirm-submitted
+  node apply-run-guard.mjs confirm-submitted [--run-id "<run-id>"]
   node apply-run-guard.mjs abort [--note "reason"]
   node apply-run-guard.mjs audit
   node apply-run-guard.mjs --help
@@ -78,6 +83,51 @@ function paths() {
 
 function now() {
   return new Date().toISOString();
+}
+
+function localDateISO(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function parseDateOnly(value, label) {
+  const date = cleanText(value, label);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new GuardError(`${label} must use YYYY-MM-DD.`);
+  }
+  const [year, month, day] = date.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
+    throw new GuardError(`${label} is not a valid calendar date.`);
+  }
+  return date;
+}
+
+function daysBetweenDateOnly(start, end) {
+  const toUtc = (value) => {
+    const [year, month, day] = value.split('-').map(Number);
+    return Date.UTC(year, month - 1, day);
+  };
+  return Math.round((toUtc(end) - toUtc(start)) / 86_400_000);
+}
+
+function validateAvailability(mode, dateValue, todayValue = localDateISO()) {
+  if (!AVAILABILITY_MODES.has(mode)) {
+    throw new GuardError('--availability-mode must be date, preserved, or absent.');
+  }
+  if (mode === 'absent') {
+    if (dateValue !== undefined) throw new GuardError('--availability-date is not valid with --availability-mode absent.');
+    return { mode, date: null, today: null, days_ahead: null };
+  }
+  const date = parseDateOnly(dateValue, '--availability-date');
+  const today = parseDateOnly(todayValue, '--today');
+  const daysAhead = daysBetweenDateOnly(today, date);
+  if (daysAhead < MIN_AVAILABILITY_DAYS) {
+    throw new GuardError(`Earliest availability must be at least ${MIN_AVAILABILITY_DAYS} days after --today (got ${daysAhead}).`);
+  }
+  return { mode, date, today, days_ahead: daysAhead };
 }
 
 function cleanText(value, label) {
@@ -321,7 +371,20 @@ function replay(events) {
         status: 'active',
         review_count: 0,
         user_change_count: 0,
+        first_review_reached_at: null,
+        review_locked_at: null,
+        review_reopen_count: 0,
+        last_review_reopened_at: null,
+        last_review_reopened_note: null,
+        availability_mode: null,
+        availability_date: null,
+        availability_checked_at: null,
+        availability_check_count: 0,
         simplify_done_at: null,
+        cover_letter_mode: null,
+        cover_letter_completed: false,
+        cover_letter_decision_at: null,
+        cover_letter_decision_count: 0,
         review_reached_at: null,
         last_review_reached_at: null,
         review_valid: false,
@@ -351,11 +414,42 @@ function replay(events) {
     run.last_event_at = event.at ?? event.finished_at ?? event.recovered_at ?? run.last_event_at;
     if (event.event === 'simplify_done') {
       run.simplify_done_at ??= event.at;
+    } else if (event.event === 'cover_letter_decision') {
+      if (run.cover_letter !== 'auto' || !COVER_LETTER_MODES.has(event.mode)) {
+        throw new GuardError(`Invalid cover_letter_decision event for run_id ${run.run_id}.`);
+      }
+      run.cover_letter_mode = event.mode;
+      run.cover_letter_completed = true;
+      run.cover_letter_decision_at = event.at;
+      run.cover_letter_decision_count += 1;
     } else if (event.event === 'review_reached') {
+      if (event.availability_mode !== undefined) {
+        const availability = validateAvailability(
+          event.availability_mode,
+          event.availability_date ?? undefined,
+          event.availability_today ?? localDateISO(),
+        );
+        run.availability_mode = availability.mode;
+        run.availability_date = availability.date;
+        run.availability_checked_at = event.at;
+        run.availability_check_count += 1;
+      }
       run.review_count += 1;
+      run.first_review_reached_at ??= event.at;
+      run.review_locked_at ??= event.at;
       run.review_reached_at ??= event.at;
       run.last_review_reached_at = event.at;
       run.review_valid = true;
+      clearBrowserHandoff(run);
+    } else if (event.event === 'review_reopened') {
+      if (run.review_count !== 1 || !run.review_valid || run.review_reopen_count >= 1) {
+        throw new GuardError(`Invalid review_reopened event for run_id ${run.run_id}.`);
+      }
+      run.review_reopen_count += 1;
+      run.last_review_reopened_at = event.at;
+      run.last_review_reopened_note = event.note ?? null;
+      run.review_valid = false;
+      run.review_invalidated_at = event.at;
       clearBrowserHandoff(run);
     } else if (event.event === 'browser_handoff') {
       if (!run.review_valid || run.browser !== 'chrome' || event.visible !== true || event.method !== 'markHandoff') {
@@ -409,6 +503,15 @@ function replay(events) {
         run.last_review_reached_at = null;
         run.user_change_count = 0;
         run.last_user_change_at = null;
+        run.first_review_reached_at = null;
+        run.review_locked_at = null;
+        run.review_reopen_count = 0;
+        run.last_review_reopened_at = null;
+        run.last_review_reopened_note = null;
+        run.availability_mode = null;
+        run.availability_date = null;
+        run.availability_checked_at = null;
+        run.availability_check_count = 0;
       }
       clearBrowserHandoff(run);
     } else if (event.event === 'run_finished') {
@@ -449,9 +552,23 @@ function runSnapshot(run, at, status, event = 'run_finished', extra = {}) {
     simplify: run.simplify,
     resume: run.resume,
     cover_letter: run.cover_letter,
+    cover_letter_mode: run.cover_letter_mode,
+    cover_letter_completed: run.cover_letter_completed,
+    cover_letter_decision_at: run.cover_letter_decision_at,
+    cover_letter_decision_count: run.cover_letter_decision_count,
     started_at: run.started_at,
     simplify_done_at: run.simplify_done_at,
+    review_count: run.review_count,
+    user_change_count: run.user_change_count,
+    first_review_reached_at: run.first_review_reached_at,
+    review_locked_at: run.review_locked_at,
     review_reached_at: run.review_reached_at,
+    review_reopen_count: run.review_reopen_count,
+    last_review_reopened_at: run.last_review_reopened_at,
+    availability_mode: run.availability_mode,
+    availability_date: run.availability_date,
+    availability_checked_at: run.availability_checked_at,
+    availability_check_count: run.availability_check_count,
     review_valid: run.review_valid,
     review_invalidated_at: run.review_invalidated_at,
     browser_handoff_at: run.browser_handoff_at,
@@ -584,7 +701,12 @@ function validateStart(values, positional, info) {
   const browser = cleanText(values.browser, '--browser');
   if (!['chrome', 'playwright'].includes(browser)) throw new GuardError('--browser must be chrome or playwright.');
   const coverLetter = cleanText(values['cover-letter'], '--cover-letter');
-  if (!['prepared', 'skip'].includes(coverLetter)) throw new GuardError('--cover-letter must be prepared or skip.');
+  if (!['auto', 'prepared', 'skip'].includes(coverLetter)) {
+    throw new GuardError('--cover-letter must be auto, prepared, or skip.');
+  }
+  if (browser === 'chrome' && values.simplify && coverLetter !== 'auto') {
+    throw new GuardError('Chrome + Simplify requires --cover-letter auto; decide from the live Cover Letter controls before Review.');
+  }
   if (browser === 'playwright' && values.simplify) throw new GuardError('--simplify is only valid with --browser chrome.');
   return {
     company,
@@ -700,7 +822,9 @@ function printRunCard(run) {
     '- complete the prepared material checks first;',
     '- let Simplify own routine fields when available;',
     '- handle only sensitive, open-ended, and genuinely empty required fields;',
-    `- cover letter decision is already ${run.cover_letter};`,
+    run.cover_letter === 'auto'
+      ? '- cover letter plan is auto; inspect the live controls and record the decision before Review;'
+      : `- cover letter decision is already ${run.cover_letter};`,
     '- reach Review before handoff; never auto-submit.',
   ].join('\n'));
 }
@@ -797,12 +921,33 @@ function recoverCommand(values, positional, info) {
 
 function markCommand(kind, values, positional, info) {
   if (positional.length !== 0) throw new GuardError(`Unexpected positional argument: ${positional[0]}`);
-  if (!['simplify_done', 'review_reached', 'user_change'].includes(kind)) {
+  if (!['simplify_done', 'review_reached', 'review_reopened', 'user_change', 'cover_letter'].includes(kind)) {
     throw new GuardError(`Unknown mark event: ${kind}`);
   }
   const note = values.note;
-  if (kind === 'user_change') cleanText(note, '--note');
-  else if (note !== undefined) throw new GuardError(`--note is not valid with mark ${kind}.`);
+  if (kind === 'user_change' || kind === 'review_reopened') cleanText(note, '--note');
+  else if (kind !== 'cover_letter' && note !== undefined) {
+    throw new GuardError(`--note is not valid with mark ${kind}.`);
+  }
+  const mode = kind === 'cover_letter' ? cleanText(values.mode, '--mode') : undefined;
+  if (kind === 'cover_letter' && !COVER_LETTER_MODES.has(mode)) {
+    throw new GuardError('--mode must be manual, upload_required, upload_optional, or absent.');
+  }
+  if (kind !== 'cover_letter' && values.mode !== undefined) {
+    throw new GuardError(`--mode is not valid with mark ${kind}.`);
+  }
+  if (kind !== 'review_reached') {
+    for (const flag of ['availability-mode', 'availability-date', 'today']) {
+      if (values[flag] !== undefined) throw new GuardError(`--${flag} is only valid with review_reached.`);
+    }
+  }
+  const availability = kind === 'review_reached'
+    ? validateAvailability(
+      cleanText(values['availability-mode'], '--availability-mode'),
+      values['availability-date'],
+      values.today ?? localDateISO(),
+    )
+    : null;
 
   return withControlLock(info, () => {
     const run = requireLiveRun(info, ['active']);
@@ -811,19 +956,53 @@ function markCommand(kind, values, positional, info) {
       if (!run.simplify) throw new GuardError('This run was not started with --simplify.');
       if (run.simplify_done_at) throw new GuardError('simplify_done was already recorded for this run.');
     } else if (kind === 'review_reached') {
+      if (run.cover_letter === 'auto' && !run.cover_letter_completed) {
+        throw new GuardError('Review requires an explicit Cover Letter decision; inspect the live controls and mark cover_letter first.');
+      }
       if (run.review_count >= 2) throw new GuardError('Only one re-review is allowed, after a user_change.');
-      if (run.review_count === 1 && run.user_change_count === 0) {
-        throw new GuardError('A second review_reached requires user_change first.');
+      if (run.review_count === 1 && run.user_change_count === 0 && run.review_reopen_count === 0) {
+        throw new GuardError('A second review_reached requires user_change or review_reopened first.');
+      }
+    } else if (kind === 'review_reopened') {
+      if (run.review_count !== 1 || !run.review_valid) {
+        throw new GuardError('review_reopened is allowed only from the current first Review checkpoint.');
+      }
+      if (run.review_reopen_count >= 1) {
+        throw new GuardError('Only one Review reopen is allowed per apply run.');
       }
     } else if (kind === 'user_change' && run.review_count !== 1) {
       throw new GuardError('user_change is allowed only after the first review_reached.');
+    } else if (kind === 'cover_letter') {
+      if (run.cover_letter !== 'auto') {
+        throw new GuardError('cover_letter decisions are only required for an auto cover-letter plan.');
+      }
+      if (run.review_count > 0 && (!run.last_user_change_at || Date.parse(run.last_user_change_at) <= Date.parse(run.last_review_reached_at))) {
+        throw new GuardError('A Cover Letter decision after Review requires mark user_change first.');
+      }
+      if (run.cover_letter_completed && (!run.last_user_change_at || Date.parse(run.last_user_change_at) <= Date.parse(run.cover_letter_decision_at))) {
+        throw new GuardError('A Cover Letter decision is already recorded; mark user_change before changing it.');
+      }
     }
     const at = now();
-    appendEvent(info, { event: kind, run_id: run.run_id, at, ...(note ? { note: cleanText(note, '--note') } : {}) });
+    appendEvent(info, {
+      event: kind === 'cover_letter' ? 'cover_letter_decision' : kind,
+      run_id: run.run_id,
+      at,
+      ...(availability ? {
+        availability_mode: availability.mode,
+        availability_date: availability.date,
+        availability_today: availability.today,
+        availability_days_ahead: availability.days_ahead,
+      } : {}),
+      ...(mode ? { mode } : {}),
+      ...(note ? { note: cleanText(note, '--note') } : {}),
+    });
     const updated = replay(readEvents(info)).find((item) => item.run_id === run.run_id);
     writeOwnerFromRun(info, updated, at);
     if (kind === 'simplify_done') console.log(`Simplify checkpoint recorded: ${at}`);
     else if (kind === 'review_reached') console.log(`Review checkpoint recorded: ${at}`);
+    else if (kind === 'review_reopened') console.log(`Review reopen recorded for ${run.run_id}.`);
+    else if (kind === 'cover_letter') console.log(`Cover Letter decision recorded: ${mode}`);
     else console.log(`User change recorded for ${run.run_id}.`);
   });
 }
@@ -868,6 +1047,9 @@ function finishCommand(values, positional, info) {
   return withControlLock(info, () => {
     const run = requireLiveRun(info, status === 'blocked' ? ['active', 'paused'] : ['active']);
     if (status === 'handed_off') {
+      if (run.cover_letter === 'auto' && !run.cover_letter_completed) {
+        throw new GuardError('handed_off requires an explicit Cover Letter decision before Review.');
+      }
       if (!run.review_valid) {
         throw new GuardError('handed_off requires a current Review checkpoint after the latest user change or recovery.');
       }
@@ -902,13 +1084,17 @@ function abortCommand(values, positional, info) {
 }
 
 function confirmSubmittedCommand(values, positional, info) {
-  if (Object.keys(values).length || positional.length) throw new GuardError('confirm-submitted takes no arguments.');
+  if (positional.length) throw new GuardError(`Unexpected positional argument: ${positional[0]}`);
   return withControlLock(info, () => {
     const runs = replay(readEvents(info));
     const pending = runs.filter((run) => run.status === 'handed_off');
     if (pending.length === 0) throw new GuardError('No handed_off run is waiting for explicit submission confirmation.');
-    if (pending.length > 1) throw new GuardError('More than one handed_off run is awaiting confirmation; confirmation is ambiguous.');
-    const run = pending[0];
+    const requestedRunId = values['run-id'] === undefined ? null : cleanText(values['run-id'], '--run-id');
+    if (!requestedRunId && pending.length > 1) {
+      throw new GuardError('More than one handed_off run is awaiting confirmation; pass --run-id to disambiguate.');
+    }
+    const run = requestedRunId ? pending.find((item) => item.run_id === requestedRunId) : pending[0];
+    if (!run) throw new GuardError(`No handed_off run is waiting for confirmation with --run-id ${requestedRunId}.`);
     const submittedAt = now();
     appendEvent(info, {
       event: 'submission_confirmed',
@@ -953,7 +1139,10 @@ function auditCommand(values, positional, info) {
         ? (pausedExpired(run) ? 'expired' : 'paused')
         : (sameRunLock(info, run) && !leaseExpired(run) ? 'present' : 'missing or expired');
       console.log(`Lease: ${lease}; lease_active_seconds: ${Math.round(currentLeaseActiveMs(run) / 1000)}`);
-      console.log(`Review count: ${run.review_count}; user changes: ${run.user_change_count}; recoveries: ${run.recovery_count}`);
+      console.log(`Review count: ${run.review_count}; user changes: ${run.user_change_count}; reopens: ${run.review_reopen_count}; recoveries: ${run.recovery_count}`);
+      console.log(`Review lock: ${run.review_locked_at ? (run.review_valid ? 'locked' : 'reopened/invalidated') : 'not reached'}`);
+      console.log(`Availability: ${run.availability_mode ?? 'pending'}${run.availability_date ? ` (${run.availability_date})` : ''}`);
+      console.log(`Cover Letter: ${run.cover_letter === 'auto' ? (run.cover_letter_completed ? run.cover_letter_mode : 'pending') : run.cover_letter}`);
       if (run.browser === 'chrome') console.log(`Browser handoff: ${run.browser_handoff_valid ? 'recorded' : 'missing'}`);
     }
   }
@@ -990,18 +1179,18 @@ function main(argv) {
   }
   if (command === 'mark') {
     const kind = argv[1];
-    if (!kind) throw new GuardError('mark requires simplify_done, review_reached, user_change, or browser_handoff.');
+    if (!kind) throw new GuardError('mark requires simplify_done, cover_letter, review_reopened, review_reached, user_change, or browser_handoff.');
     if (kind === 'browser_handoff') {
       const { values, positional } = parseArgs(argv.slice(2), ['--visible', '--method', '--note']);
       browserHandoffCommand(values, positional, info);
       return 0;
     }
-    const { values, positional } = parseArgs(argv.slice(2), ['--note']);
+    const { values, positional } = parseArgs(argv.slice(2), ['--mode', '--note', '--availability-mode', '--availability-date', '--today']);
     markCommand(kind, values, positional, info);
     return 0;
   }
   if (command === 'review_reached') {
-    const { values, positional } = parseArgs(argv.slice(1));
+    const { values, positional } = parseArgs(argv.slice(1), ['--availability-mode', '--availability-date', '--today']);
     markCommand('review_reached', values, positional, info);
     return 0;
   }
@@ -1011,7 +1200,7 @@ function main(argv) {
     return 0;
   }
   if (command === 'confirm-submitted') {
-    const { values, positional } = parseArgs(argv.slice(1));
+    const { values, positional } = parseArgs(argv.slice(1), ['--run-id']);
     confirmSubmittedCommand(values, positional, info);
     return 0;
   }

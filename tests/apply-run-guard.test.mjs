@@ -83,6 +83,13 @@ function markChromeHandoff(sandbox) {
   assert.equal(result.status, 0, result.stderr);
 }
 
+function review(sandbox, { mode = 'absent', date, today } = {}) {
+  const args = ['review_reached', '--availability-mode', mode];
+  if (date) args.push('--availability-date', date);
+  if (today) args.push('--today', today);
+  return run(sandbox, args);
+}
+
 function writeEvents(sandbox, events) {
   writeFileSync(
     join(sandbox.root, 'data', 'apply-runs.jsonl'),
@@ -146,7 +153,7 @@ function lockOwner(sandbox) {
 
 test('start validates inputs, creates one lease, and rejects a second active run', (t) => {
   const sandbox = box(t);
-  const started = run(sandbox, startArgs({ simplify: true }));
+  const started = run(sandbox, startArgs({ simplify: true, 'cover-letter': 'auto' }));
   assert.equal(started.status, 0, started.stderr);
   assert.match(started.stdout, /Run Card/);
 
@@ -155,7 +162,7 @@ test('start validates inputs, creates one lease, and rejects a second active run
   assert.equal(first.browser, 'chrome');
   assert.equal(first.simplify, true);
   assert.equal(first.resume, 'output/resume.pdf');
-  assert.equal(first.cover_letter, 'prepared');
+  assert.equal(first.cover_letter, 'auto');
   assert.ok(first.run_id);
   assert.ok(!Number.isNaN(Date.parse(first.started_at)));
   assert.equal(existsSync(join(sandbox.root, 'data', 'application-runs.md')), false);
@@ -188,6 +195,8 @@ test('start rejects malformed flags, unsafe URLs, invalid resume paths, and Play
     startArgs({ resume: '/tmp/resume.pdf' }),
     startArgs({ browser: 'safari' }),
     startArgs({ browser: 'playwright', simplify: true }),
+    startArgs({ simplify: true, 'cover-letter': 'skip' }),
+    startArgs({ simplify: true, 'cover-letter': 'prepared' }),
   ];
   for (const args of cases) {
     const result = run(sandbox, args);
@@ -199,14 +208,16 @@ test('start rejects malformed flags, unsafe URLs, invalid resume paths, and Play
 test('state guards enforce the minimal review sequence and leave human logs untouched', (t) => {
   const sandbox = box(t);
   writeFileSync(join(sandbox.root, 'data', 'application-runs.md'), 'human log\n');
-  assert.equal(run(sandbox, startArgs({ simplify: true })).status, 0);
+  assert.equal(run(sandbox, startArgs({ simplify: true, 'cover-letter': 'auto' })).status, 0);
 
   assert.equal(run(sandbox, ['mark', 'simplify_done']).status, 0);
   assert.notEqual(run(sandbox, ['mark', 'simplify_done']).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
-  assert.notEqual(run(sandbox, ['review_reached']).status, 0);
+  assert.notEqual(review(sandbox).status, 0);
+  assert.equal(run(sandbox, ['mark', 'cover_letter', '--mode', 'manual']).status, 0);
+  assert.equal(review(sandbox).status, 0);
+  assert.notEqual(review(sandbox).status, 0);
   assert.equal(run(sandbox, ['mark', 'user_change', '--note', 'Add the prepared cover letter']).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
   assert.equal(existsSync(join(sandbox.root, 'data', '.apply-run.lock')), false);
@@ -230,13 +241,122 @@ test('state guards enforce the minimal review sequence and leave human logs unto
   assert.notEqual(run(sandbox, ['confirm-submitted']).status, 0);
 });
 
+test('Review requires and records a validated earliest-availability decision', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+
+  const missing = run(sandbox, ['review_reached']);
+  assert.notEqual(missing.status, 0);
+  assert.match(`${missing.stdout}\n${missing.stderr}`, /availability/i);
+
+  const tooSoon = review(sandbox, { mode: 'date', date: '2026-11-10', today: '2026-11-09' });
+  assert.notEqual(tooSoon.status, 0);
+  assert.match(`${tooSoon.stdout}\n${tooSoon.stderr}`, /14 days|availability/i);
+
+  assert.equal(review(sandbox, { mode: 'date', date: '2026-11-23', today: '2026-11-09' }).status, 0);
+  markChromeHandoff(sandbox);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+  const finished = logLines(sandbox).at(-1);
+  assert.equal(finished.availability_mode, 'date');
+  assert.equal(finished.availability_date, '2026-11-23');
+  assert.equal(finished.availability_check_count, 1);
+  assert.ok(finished.first_review_reached_at);
+  assert.ok(finished.review_locked_at);
+});
+
+test('Review lock requires an explicit reopen reason before a return and allows one re-review', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs()).status, 0);
+  assert.equal(review(sandbox).status, 0);
+
+  const missingReason = run(sandbox, ['mark', 'review_reopened']);
+  assert.notEqual(missingReason.status, 0);
+  assert.match(`${missingReason.stdout}\n${missingReason.stderr}`, /note|reason|required/i);
+
+  assert.equal(run(sandbox, ['mark', 'review_reopened', '--note', 'Required validation error on a user-owned field']).status, 0);
+  const staleFinish = run(sandbox, ['finish', '--status', 'handed_off']);
+  assert.notEqual(staleFinish.status, 0);
+  assert.match(`${staleFinish.stdout}\n${staleFinish.stderr}`, /review/i);
+
+  assert.equal(review(sandbox).status, 0);
+  const secondReopen = run(sandbox, ['mark', 'review_reopened', '--note', 'A second return']);
+  assert.notEqual(secondReopen.status, 0);
+  assert.match(`${secondReopen.stdout}\n${secondReopen.stderr}`, /one|reopen/i);
+  markChromeHandoff(sandbox);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+  const events = logLines(sandbox);
+  assert.equal(events.filter((event) => event.event === 'review_reopened').length, 1);
+  const finished = events.at(-1);
+  assert.equal(finished.review_reopen_count, 1);
+  assert.equal(finished.review_count, 2);
+});
+
+test('submission confirmation can target one run when multiple handoffs are pending', (t) => {
+  const sandbox = box(t);
+
+  assert.equal(run(sandbox, startArgs({ browser: 'playwright', 'cover-letter': 'skip', company: 'First Co' })).status, 0);
+  assert.equal(review(sandbox).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+
+  assert.equal(run(sandbox, startArgs({ browser: 'playwright', 'cover-letter': 'skip', company: 'Second Co' })).status, 0);
+  assert.equal(review(sandbox).status, 0);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+
+  const pending = logLines(sandbox).filter((entry) => entry.event === 'run_finished');
+  assert.equal(pending.length, 2);
+  const ambiguous = run(sandbox, ['confirm-submitted']);
+  assert.notEqual(ambiguous.status, 0);
+  assert.match(`${ambiguous.stdout}\n${ambiguous.stderr}`, /--run-id|ambiguous/i);
+
+  const confirmed = run(sandbox, ['confirm-submitted', '--run-id', pending[1].run_id]);
+  assert.equal(confirmed.status, 0, confirmed.stderr);
+  assert.equal(logLines(sandbox).at(-1).event, 'submission_confirmed');
+  assert.equal(logLines(sandbox).at(-1).run_id, pending[1].run_id);
+});
+
+test('auto cover-letter plans require an explicit page decision before Review', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs({ simplify: true, 'cover-letter': 'auto' })).status, 0);
+  assert.equal(run(sandbox, ['mark', 'simplify_done']).status, 0);
+
+  const missingDecision = review(sandbox);
+  assert.notEqual(missingDecision.status, 0);
+  assert.match(`${missingDecision.stdout}\n${missingDecision.stderr}`, /cover letter|decision/i);
+
+  const invalidMode = run(sandbox, ['mark', 'cover_letter', '--mode', 'skip']);
+  assert.notEqual(invalidMode.status, 0);
+
+  assert.equal(run(sandbox, ['mark', 'cover_letter', '--mode', 'upload_optional', '--note', 'Only optional upload control was available']).status, 0);
+  assert.equal(review(sandbox).status, 0);
+  markChromeHandoff(sandbox);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+});
+
+test('changing a cover-letter decision after Review requires user_change and a fresh Review', (t) => {
+  const sandbox = box(t);
+  assert.equal(run(sandbox, startArgs({ simplify: true, 'cover-letter': 'auto' })).status, 0);
+  assert.equal(run(sandbox, ['mark', 'simplify_done']).status, 0);
+  assert.equal(run(sandbox, ['mark', 'cover_letter', '--mode', 'manual']).status, 0);
+  assert.equal(review(sandbox).status, 0);
+
+  const staleDecision = run(sandbox, ['mark', 'cover_letter', '--mode', 'upload_optional']);
+  assert.notEqual(staleDecision.status, 0);
+  assert.match(`${staleDecision.stdout}\n${staleDecision.stderr}`, /user_change|review/i);
+
+  assert.equal(run(sandbox, ['mark', 'user_change', '--note', 'Added the manual Cover Letter response']).status, 0);
+  assert.equal(run(sandbox, ['mark', 'cover_letter', '--mode', 'manual']).status, 0);
+  assert.equal(review(sandbox).status, 0);
+  markChromeHandoff(sandbox);
+  assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
+});
+
 test('Playwright cannot record Simplify, but it can still reach Review and finish', (t) => {
   const sandbox = box(t);
   assert.equal(run(sandbox, startArgs({ browser: 'playwright' })).status, 0);
   const simplify = run(sandbox, ['mark', 'simplify_done']);
   assert.notEqual(simplify.status, 0);
   assert.match(`${simplify.stdout}\n${simplify.stderr}`, /playwright|simplify/i);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
 
@@ -244,7 +364,7 @@ test('Chrome without --simplify skips the Simplify checkpoint', (t) => {
   const sandbox = box(t);
   assert.equal(run(sandbox, startArgs()).status, 0);
   assert.notEqual(run(sandbox, ['mark', 'simplify_done']).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
@@ -380,7 +500,7 @@ test('pause freezes the active lease while wall-clock time advances', (t) => {
   const resumed = run(sandbox, ['resume']);
   assert.equal(resumed.status, 0, resumed.stderr);
   assert.equal(lockOwner(sandbox).state, 'active');
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
@@ -412,7 +532,7 @@ test('a resumed run can reach Review and finish handed_off', (t) => {
   assert.equal(run(sandbox, startArgs()).status, 0);
   assert.equal(run(sandbox, ['pause']).status, 0);
   assert.equal(run(sandbox, ['resume']).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
@@ -460,7 +580,7 @@ test('recover accepts an active run whose lease expired before start materialize
 test('recovery invalidates a prior Review checkpoint until Review is reached again', (t) => {
   const sandbox = box(t);
   assert.equal(run(sandbox, startArgs()).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
 
   const events = logLines(sandbox);
   const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
@@ -474,7 +594,7 @@ test('recovery invalidates a prior Review checkpoint until Review is reached aga
   assert.notEqual(staleFinish.status, 0);
   assert.match(`${staleFinish.stdout}\n${staleFinish.stderr}`, /review|recover|current/i);
 
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
@@ -482,9 +602,9 @@ test('recovery invalidates a prior Review checkpoint until Review is reached aga
 test('recovery after a re-review starts a fresh Review epoch', (t) => {
   const sandbox = box(t);
   assert.equal(run(sandbox, startArgs()).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   assert.equal(run(sandbox, ['mark', 'user_change', '--note', 'corrected application field']).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
 
   const events = logLines(sandbox);
   const startedAt = new Date(Date.now() - 46 * 60 * 1000).toISOString();
@@ -495,7 +615,7 @@ test('recovery after a re-review starts a fresh Review epoch', (t) => {
 
   assert.equal(run(sandbox, ['recover', '--run-id', events[0].run_id]).status, 0);
   assert.notEqual(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
@@ -503,14 +623,14 @@ test('recovery after a re-review starts a fresh Review epoch', (t) => {
 test('user_change invalidates Review until the corrected form reaches Review again', (t) => {
   const sandbox = box(t);
   assert.equal(run(sandbox, startArgs()).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   assert.equal(run(sandbox, ['mark', 'user_change', '--note', 'corrected application field']).status, 0);
 
   const staleFinish = run(sandbox, ['finish', '--status', 'handed_off']);
   assert.notEqual(staleFinish.status, 0);
   assert.match(`${staleFinish.stdout}\n${staleFinish.stderr}`, /review/i);
 
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 });
@@ -630,7 +750,7 @@ test('multiple pause and resume intervals accumulate paused_seconds', (t) => {
     lease_active_ms: 20_000,
     last_active_since: resume2,
   }));
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
   const finished = logLines(sandbox).at(-1);
@@ -643,7 +763,7 @@ test('multiple pause and resume intervals accumulate paused_seconds', (t) => {
 test('Chrome handed_off is rejected until a visible markHandoff attestation is recorded', (t) => {
   const sandbox = box(t);
   assert.equal(run(sandbox, startArgs()).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   const before = readFileSync(join(sandbox.root, 'data', 'apply-runs.jsonl'), 'utf8');
   const blocked = run(sandbox, ['finish', '--status', 'handed_off']);
   assert.notEqual(blocked.status, 0);
@@ -669,10 +789,10 @@ test('Chrome handed_off is rejected until a visible markHandoff attestation is r
 test('a user change clears the Chrome handoff until Review and markHandoff are recorded again', (t) => {
   const sandbox = box(t);
   assert.equal(run(sandbox, startArgs()).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   markChromeHandoff(sandbox);
   assert.equal(run(sandbox, ['mark', 'user_change', '--note', 'fix a review field']).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   const stale = run(sandbox, ['finish', '--status', 'handed_off']);
   assert.notEqual(stale.status, 0);
   assert.match(`${stale.stdout}\n${stale.stderr}`, /markHandoff|browser_handoff/i);
@@ -683,13 +803,13 @@ test('a user change clears the Chrome handoff until Review and markHandoff are r
 test('Playwright handed_off does not require markHandoff, and Chrome blocked does not either', (t) => {
   const sandbox = box(t);
   assert.equal(run(sandbox, startArgs({ browser: 'playwright' })).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   const playwrightHandoff = run(sandbox, ['mark', 'browser_handoff', '--visible', 'true', '--method', 'markHandoff']);
   assert.notEqual(playwrightHandoff.status, 0);
   assert.equal(run(sandbox, ['finish', '--status', 'handed_off']).status, 0);
 
   assert.equal(run(sandbox, startArgs()).status, 0);
-  assert.equal(run(sandbox, ['review_reached']).status, 0);
+  assert.equal(review(sandbox).status, 0);
   assert.equal(run(sandbox, ['finish', '--status', 'blocked', '--note', 'Review tab disappeared']).status, 0);
 });
 
